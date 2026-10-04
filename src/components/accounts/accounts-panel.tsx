@@ -30,6 +30,7 @@ import { Panel, PanelEmpty, PanelLabel } from "@/components/workspace/panel";
 import { api } from "@/lib/api-client";
 import { money } from "@/lib/format";
 import type { ItemView, Snapshot } from "@/lib/types";
+import type { SectionState } from "@/components/workspace/sections";
 import { cn } from "@/lib/utils";
 import { PlaidLinkLauncher } from "./plaid-link";
 import { SetupCard } from "./setup-card";
@@ -39,7 +40,7 @@ type Props = {
   reload: () => Promise<void>;
   sync: (itemIds?: string[]) => Promise<void>;
   syncing: boolean;
-  onClose: () => void;
+  section: SectionState;
 };
 
 type LinkSession = { token: string; relinkItemId: string | null };
@@ -54,7 +55,7 @@ function ago(iso: string | null) {
   return iso ? formatDistanceToNowStrict(new Date(iso), { addSuffix: true }) : "never";
 }
 
-export function AccountsPanel({ snapshot, reload, sync, syncing, onClose }: Props) {
+export function AccountsPanel({ snapshot, reload, sync, syncing, section }: Props) {
   const [link, setLink] = useState<LinkSession | null>(null);
   const [starting, setStarting] = useState<string | null>(null);
   const [linking, setLinking] = useState(false);
@@ -76,7 +77,9 @@ export function AccountsPanel({ snapshot, reload, sync, syncing, onClose }: Prop
 
   async function finishLink(session: LinkSession, publicToken: string | null, institutionName: string | null) {
     setLinking(true);
-    const pending = toast.loading(session.relinkItemId ? "Reconnecting…" : `Linking ${institutionName ?? "account"} and pulling history…`);
+    const pending = toast.loading(
+      session.relinkItemId ? "Reconnecting…" : `Linking ${institutionName ?? "account"} and pulling history…`,
+    );
     try {
       const res = session.relinkItemId
         ? await api.relinked(session.relinkItemId)
@@ -101,7 +104,12 @@ export function AccountsPanel({ snapshot, reload, sync, syncing, onClose }: Prop
 
   const linkButtons = (
     <div className="grid grid-cols-2 gap-2">
-      <Button variant="outline" size="sm" disabled={!configured || !!starting || linking} onClick={() => startLink({ mode: "bank" })}>
+      <Button
+        variant="outline"
+        size="sm"
+        disabled={!configured || !!starting || linking}
+        onClick={() => startLink({ mode: "bank" })}
+      >
         {starting === "bank" ? <Loader2Icon className="animate-spin" /> : <BuildingIcon />} Bank or card
       </Button>
       <Button
@@ -118,8 +126,7 @@ export function AccountsPanel({ snapshot, reload, sync, syncing, onClose }: Prop
   return (
     <Panel
       id="accounts"
-      width="w-[26rem]"
-      onClose={onClose}
+      {...section}
       actions={
         <Button
           variant="ghost"
@@ -142,8 +149,12 @@ export function AccountsPanel({ snapshot, reload, sync, syncing, onClose }: Prop
         />
       )}
 
-      <div className="flex flex-col gap-5 px-4 pb-4">
-        {!configured && <SetupCard problems={snapshot.setup.problems} />}
+      <div className="flex flex-col gap-5 px-5 pb-5">
+        {!configured && (
+          <div className="max-w-2xl">
+            <SetupCard problems={snapshot.setup.problems} />
+          </div>
+        )}
 
         {snapshot.items.length === 0 ? (
           configured && (
@@ -157,94 +168,112 @@ export function AccountsPanel({ snapshot, reload, sync, syncing, onClose }: Prop
           )
         ) : (
           <>
-            {snapshot.items.map((item) => {
-              const accounts = snapshot.accounts.filter((a) => a.itemId === item.id);
-              return (
-                <section key={item.id} className="flex flex-col gap-1.5">
-                  <div className="flex items-center gap-2 px-1">
-                    <h3 className="min-w-0 flex-1 truncate text-sm font-semibold">{item.institutionName}</h3>
-                    <span
-                      className={cn(
-                        "rounded-full px-2 py-0.5 text-[10px] font-medium",
-                        item.status === "ok"
-                          ? "bg-emerald-500/12 text-emerald-700 dark:text-emerald-400"
-                          : "bg-destructive/12 text-destructive",
-                      )}
-                    >
-                      {STATUS_LABEL[item.status]}
-                    </span>
-                    <DropdownMenu>
-                      <DropdownMenuTrigger asChild>
-                        <Button variant="ghost" size="icon-xs" aria-label={`${item.institutionName} options`}>
-                          <MoreHorizontalIcon />
-                        </Button>
-                      </DropdownMenuTrigger>
-                      <DropdownMenuContent align="end">
-                        <DropdownMenuItem disabled={syncing} onSelect={() => void sync([item.id])}>
-                          <RefreshCwIcon /> Sync this login
-                        </DropdownMenuItem>
-                        <DropdownMenuItem disabled={!configured} onSelect={() => void startLink({ itemId: item.id })}>
-                          <LandmarkIcon /> Re-authenticate
-                        </DropdownMenuItem>
-                        <DropdownMenuSeparator />
-                        <DropdownMenuItem variant="destructive" onSelect={() => setPendingRemove(item)}>
-                          <Trash2Icon /> Disconnect…
-                        </DropdownMenuItem>
-                      </DropdownMenuContent>
-                    </DropdownMenu>
-                  </div>
-                  <p className="text-muted-foreground px-1 text-[11px]" suppressHydrationWarning>
-                    Synced {ago(item.lastSyncedAt)} · {item.products.join(", ") || "no products yet"}
-                  </p>
-                  {item.status !== "ok" && (
-                    <div className="border-destructive/30 bg-destructive/5 flex items-start gap-2 rounded-lg border px-3 py-2 text-xs">
-                      <AlertTriangleIcon className="text-destructive mt-0.5 size-3.5 shrink-0" />
-                      <div className="flex-1">
-                        <p>{item.errorMessage ?? item.errorCode}</p>
-                        {item.status === "login_required" && (
-                          <Button size="xs" variant="outline" className="mt-1.5" onClick={() => void startLink({ itemId: item.id })}>
-                            Re-authenticate
-                          </Button>
+            <div className="grid gap-5 lg:grid-cols-2">
+              {snapshot.items.map((item) => {
+                const accounts = snapshot.accounts.filter((a) => a.itemId === item.id);
+                return (
+                  <section key={item.id} className="flex flex-col gap-1.5">
+                    <div className="flex items-center gap-2 px-1">
+                      <h3 className="min-w-0 flex-1 truncate text-sm font-semibold">{item.institutionName}</h3>
+                      <span
+                        className={cn(
+                          "rounded-full px-2 py-0.5 text-[10px] font-medium",
+                          item.status === "ok"
+                            ? "bg-emerald-500/12 text-emerald-700 dark:text-emerald-400"
+                            : "bg-destructive/12 text-destructive",
                         )}
-                      </div>
+                      >
+                        {STATUS_LABEL[item.status]}
+                      </span>
+                      <DropdownMenu>
+                        <DropdownMenuTrigger asChild>
+                          <Button variant="ghost" size="icon-xs" aria-label={`${item.institutionName} options`}>
+                            <MoreHorizontalIcon />
+                          </Button>
+                        </DropdownMenuTrigger>
+                        <DropdownMenuContent align="end">
+                          <DropdownMenuItem disabled={syncing} onSelect={() => void sync([item.id])}>
+                            <RefreshCwIcon /> Sync this login
+                          </DropdownMenuItem>
+                          <DropdownMenuItem disabled={!configured} onSelect={() => void startLink({ itemId: item.id })}>
+                            <LandmarkIcon /> Re-authenticate
+                          </DropdownMenuItem>
+                          <DropdownMenuSeparator />
+                          <DropdownMenuItem variant="destructive" onSelect={() => setPendingRemove(item)}>
+                            <Trash2Icon /> Disconnect…
+                          </DropdownMenuItem>
+                        </DropdownMenuContent>
+                      </DropdownMenu>
                     </div>
-                  )}
-                  <ul className="divide-border/60 border-border/60 divide-y rounded-lg border">
-                    {accounts.map((a) => (
-                      <li key={a.id} className={cn("group flex items-center gap-2 px-3 py-2", a.hidden && "opacity-50")}>
-                        <span className="min-w-0 flex-1">
-                          <span className="block truncate text-sm">
-                            {a.name}
-                            {a.mask && <span className="text-muted-foreground ml-1.5 text-xs">••{a.mask}</span>}
-                          </span>
-                          <span className="text-muted-foreground block truncate text-[11px] capitalize">
-                            {a.subtype ?? a.type}
-                            {a.isLiability && " · liability"}
-                            {a.holdingsCount > 0 && ` · ${a.holdingsCount} holdings`}
-                            {a.isLiability && a.creditLimit ? ` · limit ${money(a.creditLimit, { whole: true })}` : ""}
-                          </span>
-                        </span>
-                        <span className={cn("text-sm tabular-nums", a.isLiability && "text-rose-700 dark:text-rose-400")}>
-                          {a.currentBalance === null ? "—" : money(a.isLiability ? -a.currentBalance : a.currentBalance)}
-                        </span>
-                        <Button
-                          variant="ghost"
-                          size="icon-xs"
-                          className="text-muted-foreground"
-                          aria-label={a.hidden ? "Include in net worth" : "Hide from net worth"}
-                          title={a.hidden ? "Include in net worth" : "Hide from net worth"}
-                          onClick={() => void toggleHidden(a.id, !a.hidden)}
+                    <p className="text-muted-foreground px-1 text-[11px]" suppressHydrationWarning>
+                      Synced {ago(item.lastSyncedAt)} · {item.products.join(", ") || "no products yet"}
+                    </p>
+                    {item.status !== "ok" && (
+                      <div className="border-destructive/30 bg-destructive/5 flex items-start gap-2 rounded-lg border px-3 py-2 text-xs">
+                        <AlertTriangleIcon className="text-destructive mt-0.5 size-3.5 shrink-0" />
+                        <div className="flex-1">
+                          <p>{item.errorMessage ?? item.errorCode}</p>
+                          {item.status === "login_required" && (
+                            <Button
+                              size="xs"
+                              variant="outline"
+                              className="mt-1.5"
+                              onClick={() => void startLink({ itemId: item.id })}
+                            >
+                              Re-authenticate
+                            </Button>
+                          )}
+                        </div>
+                      </div>
+                    )}
+                    <ul className="divide-border/60 border-border/60 divide-y rounded-lg border">
+                      {accounts.map((a) => (
+                        <li
+                          key={a.id}
+                          className={cn("group flex items-center gap-2 px-3 py-2", a.hidden && "opacity-50")}
                         >
-                          {a.hidden ? <EyeOffIcon /> : <EyeIcon />}
-                        </Button>
-                      </li>
-                    ))}
-                    {accounts.length === 0 && <li className="text-muted-foreground px-3 py-2 text-xs">No accounts yet. Try a sync.</li>}
-                  </ul>
-                </section>
-              );
-            })}
-            <div className="flex flex-col gap-1.5">
+                          <span className="min-w-0 flex-1">
+                            <span className="block truncate text-sm">
+                              {a.name}
+                              {a.mask && <span className="text-muted-foreground ml-1.5 text-xs">••{a.mask}</span>}
+                            </span>
+                            <span className="text-muted-foreground block truncate text-[11px] capitalize">
+                              {a.subtype ?? a.type}
+                              {a.isLiability && " · liability"}
+                              {a.holdingsCount > 0 && ` · ${a.holdingsCount} holdings`}
+                              {a.isLiability && a.creditLimit
+                                ? ` · limit ${money(a.creditLimit, { whole: true })}`
+                                : ""}
+                            </span>
+                          </span>
+                          <span
+                            className={cn("text-sm tabular-nums", a.isLiability && "text-rose-700 dark:text-rose-400")}
+                          >
+                            {a.currentBalance === null
+                              ? "—"
+                              : money(a.isLiability ? -a.currentBalance : a.currentBalance)}
+                          </span>
+                          <Button
+                            variant="ghost"
+                            size="icon-xs"
+                            className="text-muted-foreground"
+                            aria-label={a.hidden ? "Include in net worth" : "Hide from net worth"}
+                            title={a.hidden ? "Include in net worth" : "Hide from net worth"}
+                            onClick={() => void toggleHidden(a.id, !a.hidden)}
+                          >
+                            {a.hidden ? <EyeOffIcon /> : <EyeIcon />}
+                          </Button>
+                        </li>
+                      ))}
+                      {accounts.length === 0 && (
+                        <li className="text-muted-foreground px-3 py-2 text-xs">No accounts yet. Try a sync.</li>
+                      )}
+                    </ul>
+                  </section>
+                );
+              })}
+            </div>
+            <div className="flex max-w-md flex-col gap-1.5">
               <PanelLabel>Link another login</PanelLabel>
               {linkButtons}
             </div>
@@ -266,7 +295,7 @@ export function AccountsPanel({ snapshot, reload, sync, syncing, onClose }: Prop
                       r.status === "running" && "bg-muted-foreground animate-pulse",
                     )}
                   />
-                  <span className="text-muted-foreground w-24 shrink-0" suppressHydrationWarning>
+                  <span className="text-muted-foreground w-28 shrink-0" suppressHydrationWarning>
                     {ago(r.startedAt)}
                   </span>
                   <span className="text-muted-foreground w-14 shrink-0">{r.trigger}</span>
@@ -284,7 +313,8 @@ export function AccountsPanel({ snapshot, reload, sync, syncing, onClose }: Prop
         )}
 
         <p className="text-muted-foreground px-1 text-[11px] leading-4">
-          Read-only: Mycelium only requests Plaid&apos;s transactions and investments products. It can&apos;t move money.
+          Read-only: Mycelium only requests Plaid&apos;s transactions and investments products. It can&apos;t move
+          money.
         </p>
       </div>
 

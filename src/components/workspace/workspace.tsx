@@ -1,86 +1,75 @@
 "use client";
 
-import { Fragment, useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useState } from "react";
 
 import { AccountsPanel } from "@/components/accounts/accounts-panel";
 import { LedgerPanel } from "@/components/ledger/ledger-panel";
 import { NetWorthPanel } from "@/components/net-worth/net-worth-panel";
 import { useSnapshot } from "@/components/use-snapshot";
-import { moneyCompact } from "@/lib/format";
+import { money } from "@/lib/format";
 import type { Snapshot } from "@/lib/types";
-import { PANEL_IDS, PANELS, PANELS_COOKIE, serializePanels, type PanelId } from "./panels";
-import { Rail } from "./rail";
+import { COLLAPSED_COOKIE, SECTION_IDS, serializeCollapsed, type SectionId, type SectionState } from "./sections";
 import { SyncStatus } from "./sync-status";
 
-type WorkspaceProps = { initial: Snapshot; initialPanels: PanelId[]; initialLedgerParams: string };
+type WorkspaceProps = { initial: Snapshot; initialCollapsed: SectionId[]; initialLedgerParams: string };
 
-/**
- * The whole app: a floating rail of panel toggles, plus one column per open
- * panel, laid out left to right in a fixed order and centered.
- */
-export function Workspace({ initial, initialPanels, initialLedgerParams }: WorkspaceProps) {
+/** The whole app: one scrolling page with three collapsible sections. */
+export function Workspace({ initial, initialCollapsed, initialLedgerParams }: WorkspaceProps) {
   const { snapshot, reload, sync, syncing, version } = useSnapshot(initial);
-  const [open, setOpen] = useState<PanelId[]>(initialPanels);
+  const [collapsed, setCollapsed] = useState<SectionId[]>(initialCollapsed);
 
-  const update = useCallback((next: (prev: PanelId[]) => PanelId[]) => {
-    setOpen((prev) => {
-      const value = PANEL_IDS.filter((id) => next(prev).includes(id));
-      document.cookie = `${PANELS_COOKIE}=${serializePanels(value)}; path=/; max-age=31536000; samesite=lax`;
-      return value;
+  const toggle = useCallback((id: SectionId) => {
+    setCollapsed((prev) => {
+      const next = prev.includes(id) ? prev.filter((p) => p !== id) : [...prev, id];
+      document.cookie = `${COLLAPSED_COOKIE}=${serializeCollapsed(next)}; path=/; max-age=31536000; samesite=lax`;
+      return next;
     });
   }, []);
 
-  const toggle = useCallback(
-    (id: PanelId) => update((prev) => (prev.includes(id) ? prev.filter((p) => p !== id) : [...prev, id])),
-    [update],
-  );
-  const show = (id: PanelId) => update((prev) => (prev.includes(id) ? prev : [...prev, id]));
-  const close = (id: PanelId) => () => update((prev) => prev.filter((p) => p !== id));
+  const section = (id: SectionId, summary?: React.ReactNode): SectionState => ({
+    open: !collapsed.includes(id),
+    onToggle: () => toggle(id),
+    summary,
+  });
 
-  // 1–3 toggle panels, unless typing or a modal is open.
-  useEffect(() => {
-    function onKey(e: KeyboardEvent) {
-      if (e.metaKey || e.ctrlKey || e.altKey) return;
-      const target = e.target as HTMLElement | null;
-      if (target?.closest("input, textarea, select, [contenteditable], [role=dialog]")) return;
-      const id = PANEL_IDS.find((p) => PANELS[p].shortcut === e.key);
-      if (id) toggle(id);
-    }
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, [toggle]);
-
-  const badges = useMemo(() => {
-    const visible = snapshot.accounts.filter((a) => !a.hidden).length;
-    return {
-      networth: snapshot.accounts.length ? moneyCompact(snapshot.totals.netWorth) : undefined,
-      ledger: snapshot.transactionCount ? snapshot.transactionCount.toLocaleString() : undefined,
-      accounts: visible || undefined,
-    };
-  }, [snapshot]);
-
-  const renderPanel: Record<PanelId, () => React.ReactNode> = {
-    networth: () => <NetWorthPanel snapshot={snapshot} onOpenAccounts={() => show("accounts")} onClose={close("networth")} />,
-    ledger: () => (
-      <LedgerPanel snapshot={snapshot} version={version} initialParams={initialLedgerParams} onClose={close("ledger")} />
-    ),
-    accounts: () => <AccountsPanel snapshot={snapshot} reload={reload} sync={sync} syncing={syncing} onClose={close("accounts")} />,
+  const visibleAccounts = snapshot.accounts.filter((a) => !a.hidden).length;
+  const summaries: Record<SectionId, React.ReactNode> = {
+    networth: snapshot.accounts.length ? money(snapshot.totals.netWorth, { whole: true }) : undefined,
+    ledger: snapshot.transactionCount ? `${snapshot.transactionCount.toLocaleString()} transactions` : undefined,
+    accounts: snapshot.accounts.length
+      ? `${visibleAccounts} account${visibleAccounts === 1 ? "" : "s"} · ${snapshot.items.length} login${snapshot.items.length === 1 ? "" : "s"}`
+      : undefined,
   };
 
   return (
-    // Fills the viewport under the header. Scrolls sideways only when the columns don't fit.
-    <div className="h-[calc(100dvh-3.25rem)] w-full overflow-x-auto overflow-y-hidden">
-      <div className="mx-auto flex h-full w-fit items-center gap-4 px-4 sm:px-6">
-        <Rail
-          open={open}
-          onToggle={toggle}
-          badges={badges}
-          footer={<SyncStatus snapshot={snapshot} syncing={syncing} onSync={() => void sync()} />}
-        />
-
-        {open.map((id) => (
-          <Fragment key={id}>{renderPanel[id]()}</Fragment>
-        ))}
+    <div className="h-[calc(100dvh-3.25rem)] w-full overflow-y-auto">
+      <div className="mx-auto flex w-full max-w-6xl flex-col gap-4 px-4 py-5 sm:px-6">
+        <SyncStatus snapshot={snapshot} syncing={syncing} onSync={() => void sync()} />
+        {SECTION_IDS.map((id) => {
+          const s = section(id, summaries[id]);
+          if (id === "networth")
+            return (
+              <NetWorthPanel
+                key={id}
+                snapshot={snapshot}
+                section={s}
+                onOpenAccounts={() => collapsed.includes("accounts") && toggle("accounts")}
+              />
+            );
+          if (id === "ledger")
+            return (
+              <LedgerPanel
+                key={id}
+                snapshot={snapshot}
+                version={version}
+                initialParams={initialLedgerParams}
+                section={s}
+              />
+            );
+          return (
+            <AccountsPanel key={id} snapshot={snapshot} reload={reload} sync={sync} syncing={syncing} section={s} />
+          );
+        })}
       </div>
     </div>
   );

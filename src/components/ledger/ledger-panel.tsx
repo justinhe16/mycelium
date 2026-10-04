@@ -28,6 +28,7 @@ import {
   type SortKey,
 } from "@/lib/ledger-query";
 import type { LedgerPage, Snapshot } from "@/lib/types";
+import type { SectionState } from "@/components/workspace/sections";
 import { cn } from "@/lib/utils";
 import { MultiSelect, SingleSelect } from "./filters";
 
@@ -89,9 +90,9 @@ function detectPreset(q: LedgerQuery, today: string): DatePreset {
   return "custom";
 }
 
-type Props = { snapshot: Snapshot; version: number; initialParams: string; onClose: () => void };
+type Props = { snapshot: Snapshot; version: number; initialParams: string; section: SectionState };
 
-export function LedgerPanel({ snapshot, version, initialParams, onClose }: Props) {
+export function LedgerPanel({ snapshot, version, initialParams, section }: Props) {
   const [query, setQueryState] = useState<LedgerQuery>(() => parseLedgerQuery(new URLSearchParams(initialParams)));
   const [search, setSearch] = useState(query.q);
   const [result, setResult] = useState<{ key: string; page: LedgerPage } | null>(null);
@@ -150,12 +151,16 @@ export function LedgerPanel({ snapshot, version, initialParams, onClose }: Props
 
   function sortBy(col: SortKey) {
     if (query.sort === col) setQuery({ dir: query.dir === "asc" ? "desc" : "asc" });
-    else setQuery({ sort: col, dir: col === "description" || col === "account" || col === "category" || col === "kind" ? "asc" : "desc" });
+    else
+      setQuery({
+        sort: col,
+        dir: col === "description" || col === "account" || col === "category" || col === "kind" ? "asc" : "desc",
+      });
   }
 
   if (snapshot.transactionCount === 0) {
     return (
-      <Panel id="ledger" width="w-[min(66rem,calc(100vw-16rem))]" onClose={onClose}>
+      <Panel id="ledger" {...section}>
         <PanelEmpty icon={ScrollTextIcon}>
           <p>Every transaction from every linked account lands here after a sync.</p>
         </PanelEmpty>
@@ -166,11 +171,16 @@ export function LedgerPanel({ snapshot, version, initialParams, onClose }: Props
   return (
     <Panel
       id="ledger"
-      width="w-[min(66rem,calc(100vw-16rem))]"
-      scroll={false}
-      onClose={onClose}
+      {...section}
+      bodyClassName="flex h-[75vh] min-h-[28rem] flex-col"
       actions={
-        <Button variant="ghost" size="icon-sm" asChild aria-label="Download filtered ledger as CSV" title="Download CSV">
+        <Button
+          variant="ghost"
+          size="icon-sm"
+          asChild
+          aria-label="Download filtered ledger as CSV"
+          title="Download CSV"
+        >
           <a href={`/api/ledger?${new URLSearchParams([...params, ["format", "csv"]])}`} download>
             <DownloadIcon />
           </a>
@@ -275,7 +285,8 @@ export function LedgerPanel({ snapshot, version, initialParams, onClose }: Props
               Out <span className="text-rose-700 dark:text-rose-400">{money(page.outflow)}</span>
             </span>
             <span>
-              Net <span className="text-foreground font-medium">{money(page.inflow - page.outflow, { sign: true })}</span>
+              Net{" "}
+              <span className="text-foreground font-medium">{money(page.inflow - page.outflow, { sign: true })}</span>
             </span>
           </>
         )}
@@ -312,7 +323,10 @@ export function LedgerPanel({ snapshot, version, initialParams, onClose }: Props
                 <th
                   key={col}
                   aria-sort={query.sort === col ? (query.dir === "asc" ? "ascending" : "descending") : "none"}
-                  className={cn("border-border/60 border-b px-3 py-2 first:pl-5 last:pr-5", col === "amount" && "text-right")}
+                  className={cn(
+                    "border-border/60 border-b px-3 py-2 first:pl-5 last:pr-5",
+                    col === "amount" && "text-right",
+                  )}
                 >
                   <button
                     type="button"
@@ -340,7 +354,9 @@ export function LedgerPanel({ snapshot, version, initialParams, onClose }: Props
                   <span className="block truncate" title={r.rawName}>
                     {r.description}
                     {r.pending && (
-                      <span className="border-border ml-2 rounded border px-1 py-px text-[10px] font-medium uppercase">pending</span>
+                      <span className="border-border ml-2 rounded border px-1 py-px text-[10px] font-medium uppercase">
+                        pending
+                      </span>
                     )}
                   </span>
                   {r.description !== r.rawName && (
@@ -355,12 +371,17 @@ export function LedgerPanel({ snapshot, version, initialParams, onClose }: Props
                   <span className="text-muted-foreground block truncate text-[11px]">{r.institution}</span>
                 </td>
                 <td className="border-border/40 border-b px-3 py-2">
-                  <span className={cn("inline-flex rounded-full px-2 py-0.5 text-[11px] font-medium", KIND_STYLES[r.kind])}>
+                  <span
+                    className={cn("inline-flex rounded-full px-2 py-0.5 text-[11px] font-medium", KIND_STYLES[r.kind])}
+                  >
                     {KIND_LABELS[r.kind]}
                   </span>
                 </td>
                 <td className="border-border/40 border-b px-3 py-2">
-                  <span className="block truncate text-xs" title={r.categoryDetailed ? categoryLabel(r.categoryDetailed) : undefined}>
+                  <span
+                    className="block truncate text-xs"
+                    title={r.categoryDetailed ? categoryLabel(r.categoryDetailed) : undefined}
+                  >
                     {categoryLabel(r.categoryPrimary)}
                   </span>
                 </td>
@@ -385,8 +406,8 @@ export function LedgerPanel({ snapshot, version, initialParams, onClose }: Props
       {page && page.total > 0 && (
         <div className="border-border/60 text-muted-foreground flex items-center gap-2 border-t px-5 py-2 text-xs tabular-nums">
           <span>
-            {((page.page - 1) * page.pageSize + 1).toLocaleString()}–{Math.min(page.page * page.pageSize, page.total).toLocaleString()} of{" "}
-            {page.total.toLocaleString()}
+            {((page.page - 1) * page.pageSize + 1).toLocaleString()}–
+            {Math.min(page.page * page.pageSize, page.total).toLocaleString()} of {page.total.toLocaleString()}
           </span>
           <div className="ml-auto flex items-center gap-1">
             <Button
