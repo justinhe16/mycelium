@@ -50,8 +50,10 @@ export function plaidSettings(env: NodeJS.ProcessEnv = process.env): PlaidSettin
 /** What's missing before linking can work, for the setup card in the UI. */
 export function setupProblems(env: NodeJS.ProcessEnv = process.env): string[] {
   const problems: string[] = [];
-  if (!env.PLAID_CLIENT_ID?.trim() || !env.PLAID_SECRET?.trim()) problems.push("PLAID_CLIENT_ID and PLAID_SECRET are not set.");
-  if (!/^[0-9a-fA-F]{64}$/.test(env.MYCELIUM_ENC_KEY?.trim() ?? "")) problems.push("MYCELIUM_ENC_KEY is missing or not 64 hex characters.");
+  if (!env.PLAID_CLIENT_ID?.trim() || !env.PLAID_SECRET?.trim())
+    problems.push("PLAID_CLIENT_ID and PLAID_SECRET are not set.");
+  if (!/^[0-9a-fA-F]{64}$/.test(env.MYCELIUM_ENC_KEY?.trim() ?? ""))
+    problems.push("MYCELIUM_ENC_KEY is missing or not 64 hex characters.");
   return problems;
 }
 
@@ -80,26 +82,39 @@ export function plaidClient(): PlaidApi {
   return client;
 }
 
-export type PlaidErrorInfo = { code: string; type: string | null; message: string };
+export type PlaidErrorInfo = { code: string; type: string | null; message: string; requestId: string | null };
 
 /** Pull Plaid's structured error out of an axios failure, if there is one. Never includes tokens. */
 export function plaidError(err: unknown): PlaidErrorInfo | null {
   const data = (err as { response?: { data?: unknown } })?.response?.data as
-    | { error_code?: string; error_type?: string; error_message?: string; display_message?: string | null }
+    | {
+        error_code?: string;
+        error_type?: string;
+        error_message?: string;
+        display_message?: string | null;
+        request_id?: string;
+      }
     | undefined;
   if (!data?.error_code) return null;
   return {
     code: data.error_code,
     type: data.error_type ?? null,
     message: data.display_message || data.error_message || data.error_code,
+    requestId: data.request_id ?? null,
   };
 }
 
+/** One-line error for logs and the sync log. Includes Plaid's request_id, which Plaid support asks for. */
 export function describeError(err: unknown): string {
   const p = plaidError(err);
-  if (p) return `${p.code}: ${p.message}`;
+  if (p) return `${p.code}: ${p.message}${p.requestId ? ` (request_id ${p.requestId})` : ""}`;
   return err instanceof Error ? err.message : String(err);
 }
 
 /** Errors that mean "re-link this login" rather than "something broke". */
-export const RELINK_CODES = new Set(["ITEM_LOGIN_REQUIRED", "PENDING_EXPIRATION", "PENDING_DISCONNECT", "ACCESS_NOT_GRANTED"]);
+export const RELINK_CODES = new Set([
+  "ITEM_LOGIN_REQUIRED",
+  "PENDING_EXPIRATION",
+  "PENDING_DISCONNECT",
+  "ACCESS_NOT_GRANTED",
+]);

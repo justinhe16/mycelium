@@ -28,11 +28,22 @@ export async function POST(request: Request) {
     let itemId: string;
     let institutionName: string;
     if ("publicToken" in parsed.data) {
-      ({ itemId, institutionName } = await exchangePublicToken(
+      const res = await exchangePublicToken(
         { db, plaid: plaidClient() },
         parsed.data.publicToken,
         parsed.data.institutionName,
-      ));
+      );
+      if (res.status === "duplicate") {
+        // Plaid bills each login separately, so a second copy of one is discarded.
+        return fail(
+          `${res.institutionName} is already linked. Use Re-authenticate on it instead.` +
+            (res.removedFromPlaid
+              ? " The duplicate was discarded."
+              : " Plaid didn't confirm removing the duplicate; check the server log."),
+          409,
+        );
+      }
+      ({ itemId, institutionName } = res);
     } else {
       const item = db.select().from(plaidItems).where(eq(plaidItems.id, parsed.data.relinkedItemId)).get();
       if (!item) return fail("That connection no longer exists.", 404);

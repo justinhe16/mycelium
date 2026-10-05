@@ -23,7 +23,12 @@ async function main() {
       initial_products: [Products.Transactions, Products.Investments],
     })
   ).data;
-  const { itemId, institutionName } = await exchangePublicToken({ db, plaid }, public_token);
+  const res = await exchangePublicToken({ db, plaid }, public_token);
+  if (res.status === "duplicate") {
+    console.log(`${res.institutionName} is already linked (${res.existingItemId}); discarded the duplicate.`);
+    return;
+  }
+  const { itemId, institutionName } = res;
   console.log(`Linked ${institutionName} (${itemId}). Syncing…`);
   const summary = await syncNow("link", { itemIds: [itemId] });
   console.log(JSON.stringify(summary, null, 2));
