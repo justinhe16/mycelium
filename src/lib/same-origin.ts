@@ -73,3 +73,17 @@ export function mediaType(contentType: string | null): string {
 export function isJsonContentType(contentType: string | null): boolean {
   return mediaType(contentType) === "application/json";
 }
+
+/*
+ * DNS-rebinding guard. A hostile site can re-point its own domain at 127.0.0.1;
+ * the browser then treats its requests to this server as same-origin, so the
+ * Origin check above can't tell. The Host header still carries the attacker's
+ * domain, though, so only loopback names are accepted.
+ */
+const LOOPBACK_HOSTS = new Set(["127.0.0.1", "localhost", "[::1]"]);
+
+export function isLoopbackHost(host: string | null): boolean {
+  if (!host) return false;
+  const name = host.trim().toLowerCase().replace(/:\d+$/, "");
+  return LOOPBACK_HOSTS.has(name);
+}

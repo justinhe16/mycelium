@@ -20,9 +20,12 @@ if (fs.existsSync(target)) {
     fs.appendFileSync(target, `${current.endsWith("\n") || !current ? "" : "\n"}MYCELIUM_ENC_KEY=${key}\n`);
     console.log("Added MYCELIUM_ENC_KEY to .env.local.");
   }
+  fs.chmodSync(target, 0o600);
 } else {
   const template = fs.existsSync(".env.example") ? fs.readFileSync(".env.example", "utf8") : "";
   const body = template.replace(/^#?\s*MYCELIUM_ENC_KEY=.*$/m, `MYCELIUM_ENC_KEY=${key}`);
-  fs.writeFileSync(target, body.includes("MYCELIUM_ENC_KEY=") ? body : `${body}\nMYCELIUM_ENC_KEY=${key}\n`, { mode: 0o600 });
+  fs.writeFileSync(target, body.includes("MYCELIUM_ENC_KEY=") ? body : `${body}\nMYCELIUM_ENC_KEY=${key}\n`, {
+    mode: 0o600,
+  });
   console.log("Created .env.local with a new MYCELIUM_ENC_KEY. Add your Plaid keys to it next.");
 }

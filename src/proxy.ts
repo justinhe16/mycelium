@@ -1,12 +1,23 @@
 import type { NextRequest } from "next/server";
-import { checkSameOrigin } from "@/lib/same-origin";
+import { checkSameOrigin, isLoopbackHost } from "@/lib/same-origin";
 
-/** Reject cross-origin mutating requests to the API (CSRF / drive-by localhost). */
+/**
+ * Two guards for a server that trusts whoever can reach it:
+ *  - every request must be addressed to a loopback host (blocks DNS rebinding,
+ *    which would otherwise let a website read pages and API responses);
+ *  - mutating API requests must come from this origin (CSRF / drive-by localhost).
+ */
 export function proxy(request: NextRequest) {
-  const result = checkSameOrigin({ method: request.method, url: request.url, headers: request.headers });
-  if (!result.ok) return Response.json({ error: result.error }, { status: 403 });
+  if (!isLoopbackHost(request.headers.get("host"))) {
+    return new Response("Forbidden: Mycelium only answers on 127.0.0.1 / localhost.", { status: 403 });
+  }
+  if (request.nextUrl.pathname.startsWith("/api/")) {
+    const result = checkSameOrigin({ method: request.method, url: request.url, headers: request.headers });
+    if (!result.ok) return Response.json({ error: result.error }, { status: 403 });
+  }
 }
 
 export const config = {
-  matcher: "/api/:path*",
+  // Everything except static build assets.
+  matcher: "/((?!_next/static|_next/image).*)",
 };

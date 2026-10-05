@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { checkSameOrigin, isJsonContentType, isMutatingMethod, mediaType } from "@/lib/same-origin";
+import { checkSameOrigin, isJsonContentType, isLoopbackHost, isMutatingMethod, mediaType } from "@/lib/same-origin";
 
 const URL_LOCAL = "http://localhost:3000/api/import?mode=replace";
 
@@ -68,5 +68,25 @@ describe("content type helpers", () => {
     expect(isJsonContentType("text/plain")).toBe(false);
     expect(isJsonContentType("application/x-www-form-urlencoded")).toBe(false);
     expect(isJsonContentType(null)).toBe(false);
+  });
+});
+
+describe("isLoopbackHost", () => {
+  it("accepts loopback names on any port", () => {
+    for (const h of ["127.0.0.1:3002", "localhost:3002", "LOCALHOST", "[::1]:3002", "127.0.0.1"])
+      expect(isLoopbackHost(h), h).toBe(true);
+  });
+  it("rejects other hosts, including rebinding tricks", () => {
+    for (const h of [
+      null,
+      "",
+      "evil.example:3002",
+      "127.0.0.1.evil.example",
+      "localhost.evil.example:3002",
+      "192.168.1.5:3002",
+      "0.0.0.0:3002",
+    ]) {
+      expect(isLoopbackHost(h), String(h)).toBe(false);
+    }
   });
 });

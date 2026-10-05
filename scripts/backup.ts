@@ -27,7 +27,8 @@ function fmtSize(bytes: number): string {
 }
 
 async function main() {
-  fs.mkdirSync(BACKUP_DIR, { recursive: true });
+  fs.mkdirSync(BACKUP_DIR, { recursive: true, mode: 0o700 });
+  fs.chmodSync(BACKUP_DIR, 0o700);
 
   // Filesystem-safe ISO: 2026-09-10T14-32-05-123Z
   const stamp = new Date().toISOString().replace(/[:.]/g, "-");
@@ -36,6 +37,7 @@ async function main() {
   console.log(`Backing up ${DB_PATH}`);
   await db.$client.backup(dest);
 
+  fs.chmodSync(dest, 0o600); // plaintext financial data
   const size = fs.statSync(dest).size;
   console.log(`Wrote ${dest} (${fmtSize(size)})`);
 
