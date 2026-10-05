@@ -23,8 +23,9 @@ export function Panel({ id, open, onToggle, summary, actions, bodyClassName, chi
   const bodyId = `section-${id}`;
   return (
     <section
+      id={id}
       aria-label={label}
-      className="bg-card/45 border-border/50 flex w-full flex-col overflow-hidden rounded-2xl border shadow-[0_1px_2px_rgb(0_0_0/0.03),0_8px_24px_-12px_rgb(0_0_0/0.08)]"
+      className="bg-card/45 border-border/50 flex w-full scroll-mt-4 flex-col overflow-hidden rounded-2xl border shadow-[0_1px_2px_rgb(0_0_0/0.03),0_8px_24px_-12px_rgb(0_0_0/0.08)]"
     >
       <header className="flex h-14 shrink-0 items-center gap-1 pr-3 pl-2">
         <button

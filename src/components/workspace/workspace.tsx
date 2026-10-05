@@ -26,6 +26,12 @@ export function Workspace({ initial, initialCollapsed, initialLedgerParams }: Wo
     });
   }, []);
 
+  // Expand a section if needed, then bring it into view (after the expand has rendered).
+  const reveal = (id: SectionId) => {
+    if (collapsed.includes(id)) toggle(id);
+    requestAnimationFrame(() => document.getElementById(id)?.scrollIntoView({ behavior: "smooth", block: "start" }));
+  };
+
   const section = (id: SectionId, summary?: React.ReactNode): SectionState => ({
     open: !collapsed.includes(id),
     onToggle: () => toggle(id),
@@ -53,7 +59,7 @@ export function Workspace({ initial, initialCollapsed, initialLedgerParams }: Wo
                 key={id}
                 snapshot={snapshot}
                 section={s}
-                onOpenAccounts={() => collapsed.includes("accounts") && toggle("accounts")}
+                onOpenAccounts={() => reveal("accounts")}
               />
             );
           if (id === "ledger")
