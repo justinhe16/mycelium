@@ -103,15 +103,18 @@ export function LedgerPanel({ snapshot, version, initialParams, section }: Props
   const key = `${params}#${version}`;
   const loading = result?.key !== key;
 
-  // Filters live in the URL, so a reload or a bookmark lands on the same view.
+  // Updater stays pure: Strict Mode may run it twice, and it runs during render.
   function setQuery(patch: Partial<LedgerQuery>, keepPage = false) {
-    setQueryState((prev) => {
-      const next = { ...prev, ...patch, page: keepPage ? (patch.page ?? prev.page) : 1 };
-      const qs = serializeLedgerQuery(next).toString();
-      window.history.replaceState(null, "", qs ? `/?${qs}` : "/");
-      return next;
-    });
+    setQueryState((prev) => ({ ...prev, ...patch, page: keepPage ? (patch.page ?? prev.page) : 1 }));
   }
+
+  // Filters live in the URL, so a reload or a bookmark lands on the same view. Synced after
+  // commit, since Next's router observes history.replaceState and must not update mid-render.
+  useEffect(() => {
+    const qs = params.toString();
+    const target = qs ? `/?${qs}` : "/";
+    if (window.location.pathname + window.location.search !== target) window.history.replaceState(null, "", target);
+  }, [params]);
 
   useEffect(() => {
     let cancelled = false;

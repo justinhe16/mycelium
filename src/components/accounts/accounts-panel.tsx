@@ -103,7 +103,7 @@ export function AccountsPanel({ snapshot, reload, sync, syncing, section }: Prop
   }
 
   const linkButtons = (
-    <div className="grid grid-cols-2 gap-2">
+    <div className="flex flex-wrap justify-center gap-2">
       <Button
         variant="outline"
         size="sm"
@@ -149,9 +149,9 @@ export function AccountsPanel({ snapshot, reload, sync, syncing, section }: Prop
         />
       )}
 
-      <div className="flex flex-col gap-5 px-5 pb-5">
+      <div className="flex flex-col gap-8 px-6 pt-2 pb-8 sm:px-10">
         {!configured && (
-          <div className="max-w-2xl">
+          <div className="mx-auto w-full max-w-2xl">
             <SetupCard problems={snapshot.setup.problems} />
           </div>
         )}
@@ -168,13 +168,16 @@ export function AccountsPanel({ snapshot, reload, sync, syncing, section }: Prop
           )
         ) : (
           <>
-            <div className="grid gap-5 lg:grid-cols-2">
+            <div className="grid gap-5 [grid-template-columns:repeat(auto-fit,minmax(min(100%,24rem),1fr))]">
               {snapshot.items.map((item) => {
                 const accounts = snapshot.accounts.filter((a) => a.itemId === item.id);
                 return (
-                  <section key={item.id} className="flex flex-col gap-1.5">
+                  <section
+                    key={item.id}
+                    className="border-border/60 bg-background/40 flex flex-col gap-2 rounded-xl border p-5"
+                  >
                     <div className="flex items-center gap-2 px-1">
-                      <h3 className="min-w-0 flex-1 truncate text-sm font-semibold">{item.institutionName}</h3>
+                      <h3 className="min-w-0 flex-1 truncate text-base font-semibold">{item.institutionName}</h3>
                       <span
                         className={cn(
                           "rounded-full px-2 py-0.5 text-[10px] font-medium",
@@ -226,12 +229,9 @@ export function AccountsPanel({ snapshot, reload, sync, syncing, section }: Prop
                         </div>
                       </div>
                     )}
-                    <ul className="divide-border/60 border-border/60 divide-y rounded-lg border">
+                    <ul className="divide-border/50 mt-1 divide-y">
                       {accounts.map((a) => (
-                        <li
-                          key={a.id}
-                          className={cn("group flex items-center gap-2 px-3 py-2", a.hidden && "opacity-50")}
-                        >
+                        <li key={a.id} className={cn("group flex items-center gap-2 py-2.5", a.hidden && "opacity-50")}>
                           <span className="min-w-0 flex-1">
                             <span className="block truncate text-sm">
                               {a.name}
@@ -266,26 +266,31 @@ export function AccountsPanel({ snapshot, reload, sync, syncing, section }: Prop
                         </li>
                       ))}
                       {accounts.length === 0 && (
-                        <li className="text-muted-foreground px-3 py-2 text-xs">No accounts yet. Try a sync.</li>
+                        <li className="text-muted-foreground py-2 text-xs">No accounts yet. Try a sync.</li>
                       )}
                     </ul>
                   </section>
                 );
               })}
             </div>
-            <div className="flex max-w-md flex-col gap-1.5">
+            <div className="flex flex-col items-center gap-2">
               <PanelLabel>Link another login</PanelLabel>
               {linkButtons}
             </div>
           </>
         )}
+      </div>
 
-        {snapshot.runs.length > 0 && (
-          <div className="flex flex-col gap-1.5">
-            <PanelLabel>Sync log</PanelLabel>
-            <ul className="flex flex-col gap-0.5 text-[11px]">
-              {snapshot.runs.map((r) => (
-                <li key={r.id} className="flex items-center gap-2 px-1" title={r.error ?? undefined}>
+      {/* Footer: housekeeping, not content */}
+      <footer className="border-border/60 bg-muted/20 text-muted-foreground flex flex-col gap-4 border-t px-6 py-4 text-[11px] sm:px-10 md:flex-row md:items-start md:justify-between">
+        <div className="flex min-w-0 flex-1 flex-col gap-1.5">
+          <PanelLabel>Sync log</PanelLabel>
+          {snapshot.runs.length === 0 ? (
+            <p>No syncs yet.</p>
+          ) : (
+            <ul className="flex flex-col gap-0.5">
+              {snapshot.runs.slice(0, 6).map((r) => (
+                <li key={r.id} className="flex items-center gap-2" title={r.error ?? undefined}>
                   <span
                     className={cn(
                       "size-1.5 shrink-0 rounded-full",
@@ -295,11 +300,11 @@ export function AccountsPanel({ snapshot, reload, sync, syncing, section }: Prop
                       r.status === "running" && "bg-muted-foreground animate-pulse",
                     )}
                   />
-                  <span className="text-muted-foreground w-28 shrink-0" suppressHydrationWarning>
+                  <span className="w-28 shrink-0" suppressHydrationWarning>
                     {ago(r.startedAt)}
                   </span>
-                  <span className="text-muted-foreground w-14 shrink-0">{r.trigger}</span>
-                  <span className="min-w-0 flex-1 truncate tabular-nums">
+                  <span className="w-14 shrink-0">{r.trigger}</span>
+                  <span className="text-foreground/80 min-w-0 flex-1 truncate tabular-nums">
                     {r.status === "running"
                       ? "running…"
                       : r.error
@@ -309,14 +314,13 @@ export function AccountsPanel({ snapshot, reload, sync, syncing, section }: Prop
                 </li>
               ))}
             </ul>
-          </div>
-        )}
-
-        <p className="text-muted-foreground px-1 text-[11px] leading-4">
+          )}
+        </div>
+        <p className="max-w-xs leading-4 md:text-right">
           Read-only: Mycelium only requests Plaid&apos;s transactions and investments products. It can&apos;t move
           money.
         </p>
-      </div>
+      </footer>
 
       <ConfirmDialog
         open={pendingRemove !== null}
