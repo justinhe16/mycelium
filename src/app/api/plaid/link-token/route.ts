@@ -34,12 +34,11 @@ export async function POST(request: Request) {
       const res = await plaidClient().linkTokenCreate({ ...base, access_token: decrypt(item.accessTokenEnc) });
       return Response.json({ linkToken: res.data.link_token });
     }
-    const mode = LINK_MODES[parsed.data.mode];
     const res = await plaidClient().linkTokenCreate({
       ...base,
-      products: [...mode.products],
-      optional_products: [...mode.optional],
-      transactions: { days_requested: 730 },
+      products: [...LINK_MODES[parsed.data.mode].products],
+      // Ask for the full 24 months of history up front; it can't be extended later.
+      ...(parsed.data.mode === "bank" && { transactions: { days_requested: 730 } }),
     });
     return Response.json({ linkToken: res.data.link_token });
   } catch (err) {

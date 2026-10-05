@@ -25,10 +25,14 @@ export type PlaidClient = Pick<
 
 export const COUNTRY_CODES = [CountryCode.Us];
 
-/** Link flavors: a bank/card login must support transactions; an investment login must support holdings. */
+/**
+ * Link flavors. Each requests exactly one product: Plaid bills every product
+ * initialized on a login per month, so no "optional" extras (a Chase login
+ * with a brokerage account would otherwise also be billed for Investments).
+ */
 export const LINK_MODES = {
-  bank: { products: [Products.Transactions], optional: [Products.Investments] },
-  investment: { products: [Products.Investments], optional: [Products.Transactions] },
+  bank: { products: [Products.Transactions] },
+  investment: { products: [Products.Investments] },
 } as const;
 export type LinkMode = keyof typeof LINK_MODES;
 
