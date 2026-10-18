@@ -19,8 +19,8 @@ npm run keygen          # creates .env.local with an encryption key for Plaid to
 npm run dev             # http://127.0.0.1:3002
 ```
 
-Open **Accounts**, then pick **Bank or card** (Chase and the like) or **Investments** (Empower,
-401(k)s, brokerages). This starts Plaid Link.
+Open **Accounts**, then pick **Bank or card** (checking, savings, credit cards) or **Investments**
+(401(k)s, IRAs, brokerages). This starts Plaid Link.
 
 - **In Sandbox,** choose any bank and sign in with `user_good` / `pass_good`.
 - **From the CLI,** run `npm run sandbox:link`. It links Plaid's test bank without the UI.
@@ -36,7 +36,7 @@ npm run demo            # seeds data/demo.db with six months of fake data and se
 1. In the [Plaid dashboard](https://dashboard.plaid.com), request **Production** access. Personal use
    fits the free tier, which covers a handful of logins; beyond that Plaid bills per login per month.
    Check plaid.com/pricing for current terms.
-2. Chase uses OAuth. Complete the OAuth institution registration in the dashboard. On desktop, Link
+2. Some large banks connect through OAuth. Complete the OAuth institution registration in the dashboard. On desktop, Link
    handles the OAuth step in a pop-up, so no redirect URI is needed.
 3. Set `PLAID_ENV=production`, put your Production secret in `PLAID_SECRET`, and restart.
 
