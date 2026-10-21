@@ -89,7 +89,8 @@ def one(conn: sqlite3.Connection, sql: str, params: Tuple[Any, ...] = ()) -> Opt
 
 
 def money(x: Optional[float]) -> Optional[float]:
-    return None if x is None else round(x, 2)
+    # + 0.0 turns -0.0 (refunds that cancel the spend exactly) into 0.0
+    return None if x is None else round(x, 2) + 0.0
 
 
 def iso_utc(dt: datetime) -> str:

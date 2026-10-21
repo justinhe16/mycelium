@@ -325,6 +325,10 @@ class MerchantTotals(Base):
         self.assertTrue(out["truncated"])
         self.assertEqual((out["spend"], out["merchant_count"]), (2186.5, 4))
 
+    def test_refunded_merchant_is_zero_not_minus_zero(self) -> None:
+        self.assertEqual(str(cli.money(-0.0)), "0.0")
+        self.assertEqual(str(cli.money(-0.001)), "0.0")
+
     def test_bounds(self) -> None:
         for limit in (0, 101):
             with self.assertRaises(cli.UserError):
