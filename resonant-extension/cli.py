@@ -32,7 +32,10 @@ from emit import report  # noqa: E402
 
 REPORT_KEY = "mycelium/daily"
 STALE_AFTER = timedelta(hours=26)  # the sync runs daily at 07:00; allow for a late one
-NEW_WINDOW = timedelta(hours=24)  # the daily job runs once a day
+FIRST_WINDOW = timedelta(hours=24)  # "new" on the very first run, before there is a mark
+MOVE_MIN = 100.0  # net worth moves smaller than this (or MOVE_PCT of it) aren't news
+MOVE_PCT = 0.005
+MARK_FILE = "daily.json"  # in $RESONANT_EXT_DATA: what the daily job last told
 MAX_DAYS = 90
 MAX_ROWS = 30  # the model sees at most 4 KB of a result, so keep lists short
 TOP_N = 8
@@ -58,7 +61,11 @@ def db_path() -> Path:
             except (ValueError, AttributeError) as e:
                 raise UserError(f"{config} is not a JSON object: {e}") from e
             if value:
-                return Path(value).expanduser()
+                path = Path(value)
+                if not path.is_absolute():
+                    # HOME is the extension's data dir under Resonant, so `~` would mislead.
+                    raise UserError(f"database_path in {config} must be an absolute path")
+                return path
     user = os.environ.get("USER") or os.environ.get("LOGNAME") or ""
     return Path("/Users") / user / "code/mycelium/data/mycelium.db"
 
@@ -321,31 +328,55 @@ def short_money(x: float, signed: bool = False) -> str:
     return sign + body
 
 
-def daily_summary(conn: sqlite3.Connection, now: datetime) -> Dict[str, Any]:
-    """What changed since yesterday's run, as a pulse item. ``quiet`` when nothing is new."""
+def daily_summary(
+    conn: sqlite3.Connection, now: datetime, mark: Optional[Dict[str, Any]] = None
+) -> Dict[str, Any]:
+    """What changed since the last run, as a pulse item. ``quiet`` when nothing is new.
+
+    ``mark`` is what the previous run returned as ``mark`` (None on the first run). "New" is
+    measured from it, not from the clock, so a late sync or a late job neither drops nor
+    repeats transactions.
+    """
+    mark = mark or {}
     synced = last_sync(conn)
     stale = synced is None or synced < iso_utc(now - STALE_AFTER)
     attention = one(conn, "SELECT count(*) AS n FROM plaid_items WHERE status != 'ok'")["n"]
+
+    seen = mark.get("seen") or iso_utc(now - FIRST_WINDOW)
+    # Posted rows only: a pending charge comes back under a new id when it posts, so counting
+    # both would count it twice. Logins linked since the mark are left out: their first sync
+    # loads months of history, which isn't news.
     new = one(
         conn,
         "SELECT count(*) AS n,"
-        " -sum(CASE WHEN kind IN ('spend', 'refund') THEN amount ELSE 0 END) AS spent,"
-        " sum(CASE WHEN kind = 'income' THEN amount ELSE 0 END) AS income"
-        " FROM transactions WHERE created_at >= ?",
-        (iso_utc(now - NEW_WINDOW),),
+        " -sum(CASE WHEN t.kind IN ('spend', 'refund') THEN t.amount ELSE 0 END) AS spent,"
+        " sum(CASE WHEN t.kind = 'income' THEN t.amount ELSE 0 END) AS income"
+        " FROM transactions t JOIN accounts a ON a.id = t.account_id"
+        " JOIN plaid_items i ON i.id = a.item_id"
+        " WHERE t.created_at > ? AND t.pending = 0 AND i.created_at <= ?",
+        (seen, seen),
     )
     new_n, spent, income = new["n"], new["spent"] or 0.0, new["income"] or 0.0
+    linked = one(conn, "SELECT count(*) AS n FROM plaid_items WHERE created_at > ?", (seen,))["n"]
+    newest = one(conn, "SELECT max(created_at) AS at FROM transactions")["at"]
 
     latest = net_worth_on(conn, "9999-12-31")
     change: Optional[float] = None
-    if latest is not None:
+    since: Optional[str] = None
+    base_nw, base_day = mark.get("net_worth"), mark.get("net_worth_day")
+    if latest is not None and base_nw is None:
         prev = one(
             conn,
-            "SELECT net_worth FROM v_net_worth_daily WHERE day < ? ORDER BY day DESC LIMIT 1",
+            "SELECT day, net_worth FROM v_net_worth_daily WHERE day < ? ORDER BY day DESC LIMIT 1",
             (latest["day"],),
         )
-        change = latest["net_worth"] - prev["net_worth"] if prev else None
-    moved = change is not None and abs(change) >= 1
+        if prev is not None:
+            base_nw, base_day = prev["net_worth"], prev["day"]
+    if latest is not None and base_nw is not None:
+        change, since = latest["net_worth"] - base_nw, base_day
+    # Investments move every day; only a move worth mentioning is news, measured from the
+    # value last mentioned so small drifts add up instead of vanishing.
+    moved = change is not None and abs(change) >= max(MOVE_MIN, MOVE_PCT * abs(latest["net_worth"]))
 
     parts: List[str] = []
     if stale:
@@ -355,7 +386,8 @@ def daily_summary(conn: sqlite3.Connection, now: datetime) -> Dict[str, Any]:
     if latest is not None:
         nw = f"Net worth {short_money(latest['net_worth'])}"
         if moved:
-            nw += f" ({short_money(change, signed=True)})"
+            gap = since and date.fromisoformat(latest["day"]) - date.fromisoformat(since) > timedelta(days=1)
+            nw += f" ({short_money(change, signed=True)}{f' since {since}' if gap else ''})"
         parts.append(nw)
     if new_n:
         txn = f"{new_n} new transaction{'s' if new_n != 1 else ''}"
@@ -367,19 +399,52 @@ def daily_summary(conn: sqlite3.Connection, now: datetime) -> Dict[str, Any]:
         if money_bits:
             txn += ", " + ", ".join(money_bits)
         parts.append(txn)
+    if linked:
+        parts.append(f"{linked} new login{'s' if linked != 1 else ''} linked")
 
-    quiet = not (stale or attention or new_n or moved)
+    quiet = not (stale or attention or new_n or moved or linked)
     title = " · ".join(parts) if not quiet else "Nothing new in mycelium today"
     # The state is the fingerprint Resonant compares: coarse, and keyed on the snapshot day
     # so each day's summary is news once and a rerun of the same day is not.
     state = {
         "day": latest["day"] if latest is not None else None,
         "new": new_n,
+        "linked": linked,
         "net_worth_k": round(latest["net_worth"] / 1000) if latest is not None else None,
         "stale_since": synced[:10] if stale and synced else ("never" if stale else None),
         "attention": attention,
     }
-    return {"title": title, "quiet": quiet, "state": state}
+    # The next run counts from here. The net worth baseline only moves when a move was told
+    # (or there was none to compare with), so the next change is measured from what you heard.
+    next_mark = {"seen": max(seen, newest) if newest else seen}
+    if latest is not None and (moved or base_nw is None):
+        next_mark.update(net_worth=latest["net_worth"], net_worth_day=latest["day"])
+    elif base_nw is not None:
+        next_mark.update(net_worth=base_nw, net_worth_day=base_day)
+    return {"title": title, "quiet": quiet, "state": state, "mark": next_mark}
+
+
+def mark_file() -> Optional[Path]:
+    data = os.environ.get("RESONANT_EXT_DATA")
+    return Path(data) / MARK_FILE if data else None
+
+
+def read_mark(path: Optional[Path]) -> Optional[Dict[str, Any]]:
+    if path is None or not path.is_file():
+        return None
+    try:
+        value = json.loads(path.read_text())
+    except ValueError:
+        return None  # a corrupt mark only costs one day's "new" count
+    return value if isinstance(value, dict) else None
+
+
+def write_mark(path: Optional[Path], mark: Dict[str, Any]) -> None:
+    if path is None:
+        return
+    tmp = path.with_suffix(".tmp")
+    tmp.write_text(json.dumps(mark))
+    tmp.replace(path)
 
 
 # ---------------------------------------------------------------- main
@@ -412,7 +477,8 @@ def main(argv: Optional[List[str]] = None) -> int:
             elif args.cmd == "spending_summary":
                 out = spending_summary(conn, args.period, today)
             elif args.cmd == "daily":
-                summary = daily_summary(conn, now)
+                mark_path = mark_file()
+                summary = daily_summary(conn, now, read_mark(mark_path))
                 report(
                     REPORT_KEY,
                     summary["title"],
@@ -421,6 +487,7 @@ def main(argv: Optional[List[str]] = None) -> int:
                     ttl="24h",
                     quiet=summary["quiet"],
                 )
+                write_mark(mark_path, summary["mark"])
                 out = {"summary": summary["title"], "quiet": summary["quiet"]}
             else:  # health
                 one(conn, "SELECT count(*) FROM accounts")

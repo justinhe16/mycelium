@@ -127,6 +127,9 @@ class ReadOnly(Base):
             self.assertEqual(cli.db_path(), Path("/Users/someone/code/mycelium/data/mycelium.db"))
             (data / "config.json").write_text(json.dumps({"database_path": "/x/m.db"}))
             self.assertEqual(cli.db_path(), Path("/x/m.db"))
+            (data / "config.json").write_text(json.dumps({"database_path": "~/m.db"}))
+            with self.assertRaises(cli.UserError):  # ~ would be the data dir under Resonant
+                cli.db_path()
             os.environ["MYCELIUM_DB"] = "/y/m.db"
             self.assertEqual(cli.db_path(), Path("/y/m.db"))
 
@@ -207,17 +210,102 @@ class Tools(Base):
 
 
 class Daily(Base):
+    def add_txn(self, tid: str, created: datetime, amount: float = -10.0, pending: int = 0,
+                account: str = "card") -> None:
+        self.rw.execute(
+            "INSERT INTO transactions (id, account_id, date, name, amount, pending, kind, created_at,"
+            " updated_at) VALUES (?, ?, ?, 'X', ?, ?, 'spend', ?, ?)",
+            (tid, account, created.date().isoformat(), amount, pending, ts(created), ts(created)),
+        )
+        self.rw.commit()
+
     def test_new_activity_is_news(self) -> None:
         out = cli.daily_summary(self.conn, NOW)
         self.assertFalse(out["quiet"])
-        self.assertEqual(out["title"], "Net worth $23.5k (+$500) · 2 new transactions, $30 spent")
+        # The pending Uber isn't counted until it posts; the snapshots are two days apart.
+        self.assertEqual(out["title"], "Net worth $23.5k (+$500 since 2026-10-19) · 1 new transaction, $6 spent")
         self.assertEqual(
             out["state"],
-            {"day": "2026-10-21", "new": 2, "net_worth_k": 24, "stale_since": None, "attention": 0},
+            {"day": "2026-10-21", "new": 1, "linked": 0, "net_worth_k": 24, "stale_since": None,
+             "attention": 0},
         )
+        self.assertEqual(out["mark"], {"seen": ts(NOW - timedelta(hours=8)), "net_worth": 23500.0,
+                                       "net_worth_day": "2026-10-21"})
+
+    def test_new_counts_from_the_last_run(self) -> None:
+        mark = cli.daily_summary(self.conn, NOW)["mark"]
+        # The next sync is late (09:30) and so is the job (a day and 4 hours on): every row added
+        # since the last run counts once, however the clocks fall.
+        self.add_txn("n1", NOW + timedelta(hours=2))
+        self.add_txn("n2", NOW + timedelta(hours=20))
+        out = cli.daily_summary(self.conn, NOW + timedelta(days=1, hours=4), mark)
+        self.assertEqual(out["state"]["new"], 2)
+        out = cli.daily_summary(self.conn, NOW + timedelta(days=2), out["mark"])
+        self.assertEqual(out["state"]["new"], 0)
+
+    def test_pending_counts_once_when_it_posts(self) -> None:
+        mark = cli.daily_summary(self.conn, NOW)["mark"]
+        # Plaid removes the pending Uber and adds the posted one under a new id.
+        self.rw.execute("DELETE FROM transactions WHERE id = 't8'")
+        self.rw.commit()
+        self.add_txn("t8-posted", NOW + timedelta(hours=18), amount=-24.0)
+        out = cli.daily_summary(self.conn, NOW + timedelta(days=1), mark)
+        self.assertEqual(out["state"]["new"], 1)
+        self.assertIn("1 new transaction, $24 spent", out["title"])
+
+    def test_new_login_backfill_is_not_new_spending(self) -> None:
+        mark = cli.daily_summary(self.conn, NOW)["mark"]
+        linked = ts(NOW + timedelta(hours=10))
+        self.rw.execute(
+            "INSERT INTO plaid_items (id, institution_name, access_token_enc, created_at)"
+            " VALUES ('item3', 'New Bank', 'x', ?)", (linked,),
+        )
+        self.rw.execute(
+            "INSERT INTO accounts (id, item_id, name, type, is_liability, hidden, updated_at)"
+            " VALUES ('nb', 'item3', 'New Checking', 'depository', 0, 0, ?)", (linked,),
+        )
+        self.rw.commit()
+        for i in range(50):
+            self.add_txn(f"b{i}", NOW + timedelta(hours=10), amount=-100.0, account="nb")
+        out = cli.daily_summary(self.conn, NOW + timedelta(days=1), mark)
+        self.assertEqual(out["state"]["new"], 0)
+        self.assertEqual(out["state"]["linked"], 1)
+        self.assertIn("1 new login linked", out["title"])
+        self.assertNotIn("spent", out["title"])
+        # From the next run on, the new login's transactions count like any other.
+        self.add_txn("b-next", NOW + timedelta(days=1, hours=2), account="nb")
+        out = cli.daily_summary(self.conn, NOW + timedelta(days=2), out["mark"])
+        self.assertEqual((out["state"]["new"], out["state"]["linked"]), (1, 0))
+
+    def add_snapshot(self, day: str, assets: float) -> None:
+        """A day's sync: a snapshot and an ok run, at 14:00 UTC."""
+        recorded = ts(datetime.fromisoformat(day).replace(hour=14, tzinfo=timezone.utc))
+        self.rw.execute(
+            "INSERT INTO daily_snapshots VALUES (?, 'chk', ?, 0, ?), (?, 'card', 1500, 1, ?)",
+            (day, assets, recorded, day, recorded),
+        )
+        self.rw.execute(
+            "INSERT INTO sync_runs (started_at, finished_at, trigger, status) VALUES (?, ?, 'launchd', 'ok')",
+            (recorded, recorded),
+        )
+        self.rw.commit()
+
+    def test_small_net_worth_moves_add_up(self) -> None:
+        mark = cli.daily_summary(self.conn, NOW)["mark"]  # told $23.5k
+        later = NOW + timedelta(days=1)
+        self.add_snapshot("2026-10-22", 25060.0)  # +$60: not news
+        out = cli.daily_summary(self.conn, later, mark)
+        self.assertTrue(out["quiet"])
+        self.assertEqual(out["mark"]["net_worth"], 23500.0)  # baseline stays at what was told
+        self.add_snapshot("2026-10-23", 25150.0)  # +$150 since the last mention: news
+        out = cli.daily_summary(self.conn, later + timedelta(days=1), out["mark"])
+        self.assertFalse(out["quiet"])
+        self.assertIn("(+$150 since 2026-10-21)", out["title"])
+        self.assertEqual(out["mark"]["net_worth"], 23650.0)
 
     def test_quiet_when_nothing_is_new(self) -> None:
         # Two days later, after a sync that found nothing and an unchanged balance.
+        mark = cli.daily_summary(self.conn, NOW)["mark"]
         later = NOW + timedelta(days=2)
         self.rw.execute(
             "INSERT INTO daily_snapshots SELECT '2026-10-23', account_id, balance, is_liability, recorded_at"
@@ -228,7 +316,7 @@ class Daily(Base):
             (ts(later - timedelta(hours=1)), ts(later - timedelta(hours=1))),
         )
         self.rw.commit()
-        out = cli.daily_summary(self.conn, later)
+        out = cli.daily_summary(self.conn, later, mark)
         self.assertTrue(out["quiet"])
         self.assertEqual(out["title"], "Nothing new in mycelium today")
 
@@ -251,8 +339,10 @@ class Daily(Base):
 class Contract(Base):
     """The CLI as Resonant runs it: python -I -S, a scratch environment, events on fd 3."""
 
-    def run_cli(self, *args: str, events: bool = False) -> tuple:
+    def run_cli(self, *args: str, events: bool = False, data: Path | None = None) -> tuple:
         env = {"PATH": "/usr/bin:/bin", "MYCELIUM_DB": str(self.path), "HOME": self.tmp.name}
+        if data is not None:
+            env["RESONANT_EXT_DATA"] = env["HOME"] = str(data)
         r, w = os.pipe()
         if events:
             env["RESONANT_EVENTS_FD"] = str(w)  # pass_fds keeps the number in the child
@@ -297,6 +387,16 @@ class Contract(Base):
         self.assertIn(item["data"]["quiet"], (True, False))
         self.assertEqual(json.loads(proc.stdout)["summary"], item["text"])
 
+    def test_daily_keeps_its_mark_in_the_data_dir(self) -> None:
+        data = Path(self.tmp.name) / "ext-data"
+        data.mkdir()
+        proc, _ = self.run_cli("daily", data=data)
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        mark = json.loads((data / "daily.json").read_text())
+        self.assertIn("seen", mark)
+        proc, _ = self.run_cli("daily", data=data)  # nothing added since: nothing new
+        self.assertNotIn("new transaction", json.loads(proc.stdout)["summary"])
+
     def test_never_writes(self) -> None:
         self.rw.close()  # checkpoints the WAL into the main file
         before = hashlib.sha256(self.path.read_bytes()).hexdigest()
@@ -326,12 +426,24 @@ class Manifest(unittest.TestCase):
         self.assertNotIn("secrets", keys)
         self.assertNotIn("approvers", keys)  # the owner approves; nobody else
         self.assertEqual(set(re.findall(r"effect: (\w+)", text)), {"read"})
-        try:
-            from resonant_sdk import load_manifest  # type: ignore
-        except ImportError:
-            self.skipTest("resonant-sdk not installed")
-        m = load_manifest(EXT / "resonant.yaml")
-        self.assertEqual(m.name, "mycelium")
+
+    def test_resonant_validators_pass(self) -> None:
+        """Resonant's own checks, run with its interpreter ($RESONANT_PYTHON or ~/resonant/.venv)."""
+        python = Path(os.environ.get("RESONANT_PYTHON") or Path.home() / "resonant/.venv/bin/python")
+        if not python.is_file():
+            self.skipTest("no Resonant interpreter (set RESONANT_PYTHON)")
+        check = (
+            "import sys; from pathlib import Path\n"
+            "from resonant_sdk import load_manifest\n"
+            "from resonant.extensions.checks import name_errors, dir_errors\n"
+            "root = Path(sys.argv[1]); m = load_manifest(root / 'resonant.yaml')\n"
+            "errors = name_errors(m) + dir_errors(root, m)\n"
+            "print(m.name); print('\\n'.join(errors)); sys.exit(1 if errors else 0)\n"
+        )
+        proc = subprocess.run([str(python), "-c", check, str(EXT)], capture_output=True, text=True,
+                              timeout=60)
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        self.assertEqual(proc.stdout.split("\n")[0], "mycelium")
 
 
 if __name__ == "__main__":

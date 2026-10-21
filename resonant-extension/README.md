@@ -25,12 +25,23 @@ pulling changes, `resonant ext update mycelium`.
 | `account_balances` | tool | L0 | Every account with its balance (available when it differs), liabilities marked `owed`, hidden accounts marked and left out of the totals. |
 | `recent_transactions {days}` | tool | L0 | The last `days` (1-90) of transactions, newest first, at most 30 shown, plus the total count. Pending ones are marked. |
 | `spending_summary {period}` | tool | L0 | Income, spend (net of refunds), refunds, net, top categories and merchants. Posted only, transfers excluded. `period`: `this_month`, `last_month`, `last_7_days`, `last_30_days`, `ytd`, `YYYY-MM`, or `YYYY-MM-DD..YYYY-MM-DD`. |
-| `daily` | job, 07:20 | L0 | After mycelium's 07:00 launchd sync, reports the pulse item `mycelium/daily` at `normal` urgency: `Net worth $23.5k (+$500) · 2 new transactions, $30 spent`. "New" means transactions mycelium added in the last 24 hours. A sync older than 26 hours or a login that needs relinking leads the line (`⚠ no sync since 2026-10-19`). With none of that, no new transactions and an unchanged net worth, it reports **quiet**, so the pulse and the briefing leave it out. `catchup: 2h`. |
+| `daily` | job, 07:20 | L0 | After mycelium's 07:00 launchd sync, reports the pulse item `mycelium/daily` at `normal` urgency: `Net worth $23.5k (+$500) · 2 new transactions, $30 spent`. "New" means posted transactions mycelium added since the job's last run (see below). A sync older than 26 hours or a login that needs relinking leads the line (`⚠ no sync since 2026-10-19`). A newly linked login is mentioned (`1 new login linked`), but its history isn't counted as new spending. Net worth counts as moved when it is $100 or 0.5% (whichever is more) away from the last figure reported. With none of that, it reports **quiet**, so the pulse and the briefing leave it out. `catchup: 2h`. |
 | health | every 30 min | | The database opens and `accounts` reads. |
 
-The item's state is coarse (the snapshot day, the new-transaction count, net worth in thousands,
-the stale and relink flags), so each day's summary is news once and a rerun is not. It never texts
-on its own: `report: {max_urgency: normal}` puts it in the next hourly pulse.
+The job keeps a mark in `$RESONANT_EXT_DATA/daily.json`: the newest `created_at` it has counted
+and the net worth it last reported. The next run counts from that mark, so a late sync or a late
+job never drops or repeats a transaction. Pending rows are left out because Plaid re-adds a posted
+charge under a new id; counting both would count it twice. Without a mark (the first run, which
+Resonant keeps silent anyway), it counts the last 24 hours.
+
+The item's state is coarse (the snapshot day, the new-transaction and new-login counts, net worth
+in thousands, the stale and relink flags), so each day's summary is news once and a rerun is not.
+A stale sync is told once, not every day, until something else changes. It never texts on its own:
+`report: {max_urgency: normal}` puts it in the next hourly pulse.
+
+The job has no `tz`, so it runs on the daemon's timezone. That matches the launchd sync while both
+run on the same Mac. If they ever run on different machines, set `tz` so 07:20 still falls after
+the sync.
 
 ## Trust
 
@@ -47,7 +58,8 @@ on its own: `report: {max_urgency: normal}` puts it in the next hourly pulse.
 Where the database is, first match wins:
 
 1. `$MYCELIUM_DB`, for running by hand (Resonant builds the environment from scratch).
-2. `database_path` in `~/.resonant/ext-data/mycelium/config.json`:
+2. `database_path` in `~/.resonant/ext-data/mycelium/config.json`, as an absolute path (under
+   Resonant, `HOME` is the data dir, so `~` doesn't mean your home):
    `{"database_path": "/Users/justinhe/code/mycelium/data/mycelium.db"}`.
 3. `/Users/$USER/code/mycelium/data/mycelium.db`.
 
@@ -60,4 +72,6 @@ npm run test:resonant      # python3 -m unittest discover -s resonant-extension/
 
 The tests build their database from `drizzle/*.sql`, so they run against mycelium's real schema and
 views. `emit.py` is a verbatim copy of `resonant_sdk/emit.py`; a test checks it still matches when a
-Resonant checkout is at `~/resonant`.
+Resonant checkout is at `~/resonant`. Another test runs Resonant's `load_manifest`, `name_errors`
+and `dir_errors` with `~/resonant/.venv/bin/python` (or `$RESONANT_PYTHON`), and skips when
+neither exists.
