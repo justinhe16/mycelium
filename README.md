@@ -59,6 +59,12 @@ npm run launchd:uninstall
 - Each sync uses `/accounts/get`, which returns cached balances included with Transactions. It does
   not call the per-request real-time balance endpoint.
 
+## Resonant
+
+[`resonant-extension/`](./resonant-extension/README.md) lets Resonant answer questions about your
+money by text (net worth, balances, transactions, spending) and adds a daily summary to its pulse
+after the 07:00 sync. It reads the database read-only.
+
 ## Architecture
 
 | Piece | What it is |

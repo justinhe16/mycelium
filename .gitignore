@@ -56,3 +56,6 @@ next-env.d.ts
 *.db-shm
 *.db-wal
 *.sqlite
+
+# Python bytecode (the Resonant extension's tests)
+__pycache__/
