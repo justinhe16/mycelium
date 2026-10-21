@@ -397,6 +397,14 @@ class Contract(Base):
         proc, _ = self.run_cli("daily", data=data)  # nothing added since: nothing new
         self.assertNotIn("new transaction", json.loads(proc.stdout)["summary"])
 
+    def test_a_corrupt_mark_is_ignored(self) -> None:
+        data = Path(self.tmp.name) / "ext-data"
+        data.mkdir()
+        for bad in ("{", "[]", '{"seen": 5}', '{"seen": "2026-10-20T00:00:00.000Z", "net_worth": "x"}'):
+            (data / "daily.json").write_text(bad)
+            proc, _ = self.run_cli("daily", data=data)
+            self.assertEqual(proc.returncode, 0, proc.stderr)
+
     def test_never_writes(self) -> None:
         self.rw.close()  # checkpoints the WAL into the main file
         before = hashlib.sha256(self.path.read_bytes()).hexdigest()

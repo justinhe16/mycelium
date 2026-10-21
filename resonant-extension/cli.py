@@ -432,11 +432,18 @@ def mark_file() -> Optional[Path]:
 def read_mark(path: Optional[Path]) -> Optional[Dict[str, Any]]:
     if path is None or not path.is_file():
         return None
+    # A corrupt mark only costs one day's "new" count; never let it fail every run.
     try:
         value = json.loads(path.read_text())
-    except ValueError:
-        return None  # a corrupt mark only costs one day's "new" count
-    return value if isinstance(value, dict) else None
+    except (OSError, ValueError):
+        return None
+    if not isinstance(value, dict) or not isinstance(value.get("seen"), str):
+        return None
+    if not isinstance(value.get("net_worth"), (int, float, type(None))) or not isinstance(
+        value.get("net_worth_day"), (str, type(None))
+    ):
+        value = {"seen": value["seen"]}
+    return value
 
 
 def write_mark(path: Optional[Path], mark: Dict[str, Any]) -> None:
