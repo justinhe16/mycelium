@@ -6,7 +6,7 @@ import { dailySnapshots, holdings, plaidItems, syncRuns, transactions } from "..
 import { queryLedger } from "../ledger";
 import { DEFAULT_QUERY } from "../ledger-query";
 import { loadSnapshot } from "../queries";
-import { runSync, type SyncDeps } from "../sync";
+import { pairCardPayments, reclassifyAll, runSync, type SyncDeps } from "../sync";
 
 /* A fake Plaid that serves scripted /transactions/sync pages. */
 
@@ -102,7 +102,7 @@ describe("runSync", () => {
     const byId = Object.fromEntries(rows.map((r) => [r.id, r]));
     expect(byId.t1).toMatchObject({ amount: 2500, kind: "income" });
     expect(byId.t2).toMatchObject({ amount: -42.1, kind: "spend" });
-    expect(byId.t3).toMatchObject({ amount: -200, kind: "transfer" });
+    expect(byId.t3).toMatchObject({ amount: -200, kind: "transfer", transferTag: "card_payment", unmatched: true });
 
     expect(db.select().from(plaidItems).get()!.txCursor).toBe("c2");
     expect(db.select().from(dailySnapshots).all()).toHaveLength(2);
@@ -204,6 +204,128 @@ describe("runSync", () => {
   });
 });
 
+describe("reclassify and pair", () => {
+  const ids = () =>
+    Object.fromEntries(
+      db
+        .select({ id: transactions.id, kind: transactions.kind, tag: transactions.transferTag, unmatched: transactions.unmatched })
+        .from(transactions)
+        .all()
+        .map((r) => [r.id, { kind: r.kind, tag: r.tag, unmatched: r.unmatched }]),
+    );
+
+  it("fixes rows stored under the old rules, idempotently", async () => {
+    plaid.pages.set("", {
+      added: [
+        txn("pay", "chk", 1200, "2026-01-05", "LOAN_PAYMENTS", "LOAN_PAYMENTS_CREDIT_CARD_PAYMENT"),
+        txn("recv", "card", -1200, "2026-01-06", "LOAN_DISBURSEMENTS", "LOAN_DISBURSEMENTS_OTHER_DISBURSEMENT"),
+        txn("venmo", "chk", 40, "2026-01-07", "TRANSFER_OUT", "TRANSFER_OUT_TRANSFER_OUT_FROM_APPS"),
+      ],
+      next_cursor: "c1",
+      has_more: false,
+    });
+    await runSync(deps(), "manual");
+    expect(ids().recv).toEqual({ kind: "transfer", tag: "card_payment", unmatched: false });
+
+    // What the old classify() stored: the card side as a refund, Venmo as a transfer, no tags.
+    db.update(transactions).set({ kind: "refund", transferTag: null }).where(eq(transactions.id, "recv")).run();
+    db.update(transactions).set({ kind: "transfer", transferTag: null }).where(eq(transactions.id, "venmo")).run();
+    db.update(transactions).set({ transferTag: null }).where(eq(transactions.id, "pay")).run();
+
+    const res = await runSync(deps(), "manual"); // nothing new from Plaid; the rules still re-apply
+    if (res.skipped) throw new Error("skipped");
+    expect(res.reclassified).toBe(3);
+    expect(ids()).toEqual({
+      pay: { kind: "transfer", tag: "card_payment", unmatched: false },
+      recv: { kind: "transfer", tag: "card_payment", unmatched: false },
+      venmo: { kind: "spend", tag: null, unmatched: false },
+    });
+    expect(reclassifyAll(db)).toBe(0);
+  });
+
+  it("pairs card payments with receipts on linked cards, one to one, within five days", async () => {
+    plaid.accounts.push(account("loan", "loan", 9000));
+    plaid.pages.set("", {
+      added: [
+        // Paid and received two days apart: matched.
+        txn("p1", "chk", 500, "2026-01-05", "LOAN_PAYMENTS", "LOAN_PAYMENTS_CREDIT_CARD_PAYMENT"),
+        txn("r1", "card", -500, "2026-01-07", "LOAN_DISBURSEMENTS", "LOAN_DISBURSEMENTS_OTHER_DISBURSEMENT"),
+        // Same amount again, but the one receipt is already used: unmatched.
+        txn("p2", "chk", 500, "2026-01-06", "LOAN_PAYMENTS", "LOAN_PAYMENTS_CREDIT_CARD_PAYMENT"),
+        // A card that isn't linked: unmatched.
+        txn("p3", "chk", 321.45, "2026-01-08", "LOAN_PAYMENTS", "LOAN_PAYMENTS_CREDIT_CARD_PAYMENT"),
+        // Receipt too late (6 days): unmatched.
+        txn("p4", "chk", 75, "2026-01-01", "LOAN_PAYMENTS", "LOAN_PAYMENTS_CREDIT_CARD_PAYMENT"),
+        txn("r4", "card", -75, "2026-01-07", "LOAN_PAYMENTS", "LOAN_PAYMENTS_CREDIT_CARD_PAYMENT"),
+        // A loan account counts as a linked liability too.
+        txn("p5", "chk", 250, "2026-01-10", "LOAN_PAYMENTS", "LOAN_PAYMENTS_CREDIT_CARD_PAYMENT"),
+        txn("r5", "loan", -250, "2026-01-10", "LOAN_PAYMENTS", "LOAN_PAYMENTS_OTHER_PAYMENT"),
+        // Pending: its other side may not have posted yet, so never flagged.
+        txn("p6", "chk", 90, "2026-01-12", "LOAN_PAYMENTS", "LOAN_PAYMENTS_CREDIT_CARD_PAYMENT", { pending: true }),
+        // An investment move has no cash rows on the other side, and isn't flagged.
+        txn("i1", "chk", 1000, "2026-01-09", "TRANSFER_OUT", "TRANSFER_OUT_INVESTMENT_AND_RETIREMENT_FUNDS"),
+      ],
+      next_cursor: "c1",
+      has_more: false,
+    });
+    const res = await runSync(deps(), "manual");
+    if (res.skipped) throw new Error("skipped");
+    expect(res.unmatched).toBe(3);
+    const flags = Object.fromEntries(Object.entries(ids()).map(([id, r]) => [id, r.unmatched]));
+    expect(flags).toEqual({ p1: false, r1: false, p2: true, p3: true, p4: true, r4: false, p5: false, r5: false, p6: false, i1: false });
+    expect(ids().i1).toMatchObject({ kind: "transfer", tag: "invest" });
+
+    // Linking the missing receipt later clears the flag; re-pairing is stable.
+    plaid.pages.set("c1", { added: [txn("r3", "card", -321.45, "2026-01-09", "LOAN_PAYMENTS", "LOAN_PAYMENTS_CREDIT_CARD_PAYMENT")], next_cursor: "c2", has_more: false });
+    await runSync(deps(), "manual");
+    expect(ids().p3.unmatched).toBe(false);
+    expect(pairCardPayments(db)).toBe(2);
+    expect(pairCardPayments(db)).toBe(2);
+
+    const ledger = queryLedger(db, DEFAULT_QUERY);
+    expect(ledger.inflow).toBe(0);
+    expect(ledger.outflow).toBe(0);
+    expect(ledger.transfers).toEqual({
+      moved: 500 + 500 + 321.45 + 75 + 250 + 90 + 1000,
+      invested: 1000,
+      cardPayments: 500 + 500 + 321.45 + 75 + 250 + 90,
+      unmatched: { count: 2, total: 575 },
+    });
+  });
+
+  it("totals the views by kind and tag", async () => {
+    plaid.pages.set("", {
+      added: [
+        txn("w", "chk", -3000, "2026-01-01", "INCOME", "INCOME_WAGES"),
+        txn("s", "card", 60, "2026-01-02", "FOOD_AND_DRINK"),
+        txn("v", "chk", 45, "2026-01-03", "TRANSFER_OUT", "TRANSFER_OUT_TRANSFER_OUT_FROM_APPS"),
+        txn("vb", "chk", -20, "2026-01-04", "TRANSFER_IN", "TRANSFER_IN_TRANSFER_IN_FROM_APPS"),
+        txn("pay", "chk", 60, "2026-01-05", "LOAN_PAYMENTS", "LOAN_PAYMENTS_CREDIT_CARD_PAYMENT"),
+        txn("recv", "card", -60, "2026-01-05", "LOAN_DISBURSEMENTS", "LOAN_DISBURSEMENTS_OTHER_DISBURSEMENT"),
+        txn("rh", "chk", 400, "2026-01-06", "TRANSFER_OUT", "TRANSFER_OUT_INVESTMENT_AND_RETIREMENT_FUNDS"),
+        txn("sav", "chk", 100, "2026-01-07", "TRANSFER_OUT", "TRANSFER_OUT_ACCOUNT_TRANSFER"),
+      ],
+      next_cursor: "c1",
+      has_more: false,
+    });
+    await runSync(deps(), "manual");
+    const rows = db.all<{ kind: string; transfer_tag: string | null; total: number; unmatched: number }>(
+      sql`select kind, transfer_tag, sum(amount) as total, sum(unmatched) as unmatched from v_ledger group by 1, 2 order by 1, 2`,
+    );
+    expect(rows).toEqual([
+      { kind: "income", transfer_tag: null, total: 3000, unmatched: 0 },
+      { kind: "refund", transfer_tag: null, total: 20, unmatched: 0 },
+      { kind: "spend", transfer_tag: null, total: -105, unmatched: 0 },
+      { kind: "transfer", transfer_tag: "card_payment", total: 0, unmatched: 0 },
+      { kind: "transfer", transfer_tag: "internal", total: -100, unmatched: 0 },
+      { kind: "transfer", transfer_tag: "invest", total: -400, unmatched: 0 },
+    ]);
+    const page = queryLedger(db, DEFAULT_QUERY);
+    expect([page.inflow, page.outflow]).toEqual([3020, 105]);
+    expect(page.transfers).toEqual({ moved: 560, invested: 400, cardPayments: 60, unmatched: { count: 0, total: 0 } });
+  });
+});
+
 describe("ledger + views", () => {
   beforeEach(async () => {
     plaid.pages.set("", {
@@ -224,8 +346,11 @@ describe("ledger + views", () => {
     const all = queryLedger(db, DEFAULT_QUERY);
     expect(all.total).toBe(5);
     expect(all.rows.map((r) => r.id)).toEqual(["e", "d", "c", "b", "a"]);
+    // In/Out leave the card payment (a transfer) out; it's totalled under transfers.
     expect(all.inflow).toBe(3010);
-    expect(all.outflow).toBe(210);
+    expect(all.outflow).toBe(105);
+    expect(all.transfers).toEqual({ moved: 105, invested: 0, cardPayments: 105, unmatched: { count: 1, total: 105 } });
+    expect(all.rows.find((r) => r.id === "d")).toMatchObject({ kind: "transfer", transferTag: "card_payment", unmatched: true });
 
     const spend = queryLedger(db, { ...DEFAULT_QUERY, kinds: ["spend"], sort: "amount", dir: "asc" });
     expect(spend.rows.map((r) => r.id)).toEqual(["c", "b"]);

@@ -20,6 +20,8 @@ export async function GET(request: Request) {
         "amount",
         "currency",
         "kind",
+        "transferTag",
+        "unmatched",
         "categoryPrimary",
         "categoryDetailed",
         "pending",

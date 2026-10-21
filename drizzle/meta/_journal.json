@@ -15,6 +15,20 @@
       "when": 1791094487366,
       "tag": "0001_views",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "6",
+      "when": 1792615079538,
+      "tag": "0002_transfer_tags",
+      "breakpoints": true
+    },
+    {
+      "idx": 3,
+      "version": "6",
+      "when": 1792615079923,
+      "tag": "0003_ledger_transfer_tags",
+      "breakpoints": true
     }
   ]
 }

@@ -45,6 +45,8 @@ export type SyncSummary =
       items: ItemResult[];
       snapshotDay: string;
       snapshotAccounts: number;
+      reclassified: number;
+      unmatched: number;
     };
 
 /** A run stuck in "running" longer than this is presumed dead (crashed process) and ignored. */
@@ -75,6 +77,11 @@ export async function runSync(deps: SyncDeps, trigger: SyncTrigger, opts: { item
     const items: ItemResult[] = [];
     for (const item of itemRows) items.push(await syncItem(deps, item));
 
+    // Re-apply the classification rules to every stored row (so a rule change, or a row
+    // stored under older rules, is fixed on the next sync), then pair card payments.
+    const reclassified = reclassifyAll(db);
+    const unmatched = pairCardPayments(db);
+
     const snapshotDay = todayIso(now());
     const snapshotAccounts = recordSnapshot(db, snapshotDay, now().toISOString());
 
@@ -98,6 +105,8 @@ export async function runSync(deps: SyncDeps, trigger: SyncTrigger, opts: { item
           ...totals,
           snapshotDay,
           snapshotAccounts,
+          reclassified,
+          unmatched,
           items: items.map((i) => ({ id: i.itemId, institution: i.institution, status: i.status, error: i.error })),
         }),
         error: failed ? items.filter((i) => i.error).map((i) => `${i.institution}: ${i.error}`).join("; ") : null,
@@ -105,7 +114,7 @@ export async function runSync(deps: SyncDeps, trigger: SyncTrigger, opts: { item
       .where(eq(syncRuns.id, runId))
       .run();
 
-    return { skipped: false, runId, status, items, snapshotDay, snapshotAccounts };
+    return { skipped: false, runId, status, items, snapshotDay, snapshotAccounts, reclassified, unmatched };
   } catch (err) {
     db.update(syncRuns)
       .set({ finishedAt: now().toISOString(), status: "error", error: describeError(err) })
@@ -232,8 +241,13 @@ async function pullTransactions(
 }
 
 export function applyTransactions(db: Db, itemId: string, delta: TransactionsDelta, nowIso: string) {
-  const known = new Set(
-    db.select({ id: accounts.id }).from(accounts).where(eq(accounts.itemId, itemId)).all().map((r) => r.id),
+  const known = new Map(
+    db
+      .select({ id: accounts.id, type: accounts.type, subtype: accounts.subtype })
+      .from(accounts)
+      .where(eq(accounts.itemId, itemId))
+      .all()
+      .map((r) => [r.id, { accountType: r.type, accountSubtype: r.subtype }]),
   );
   let added = 0;
   let modified = 0;
@@ -245,10 +259,12 @@ export function applyTransactions(db: Db, itemId: string, delta: TransactionsDel
       ...delta.modified.map((t) => ({ t, isNew: false })),
     ];
     for (const { t, isNew } of upserts) {
-      if (!known.has(t.account_id)) continue;
+      const account = known.get(t.account_id);
+      if (!account) continue;
       const amount = normalizeAmount(t.amount);
       const primary = t.personal_finance_category?.primary ?? null;
       const detailed = t.personal_finance_category?.detailed ?? null;
+      const { kind, tag } = classify(amount, primary, detailed, account);
       const values = {
         accountId: t.account_id,
         date: t.date,
@@ -261,7 +277,8 @@ export function applyTransactions(db: Db, itemId: string, delta: TransactionsDel
         categoryPrimary: primary,
         categoryDetailed: detailed,
         paymentChannel: t.payment_channel ? String(t.payment_channel) : null,
-        kind: classify(amount, primary, detailed),
+        kind,
+        transferTag: tag,
         updatedAt: nowIso,
       };
       const res = tx
@@ -282,6 +299,99 @@ export function applyTransactions(db: Db, itemId: string, delta: TransactionsDel
   });
 
   return { added, modified, removed };
+}
+
+/**
+ * Re-run `classify` over every stored transaction and write back the rows whose kind or
+ * transfer tag changed. Idempotent: a second run changes nothing. Returns rows changed.
+ */
+export function reclassifyAll(db: Db): number {
+  const rows = db
+    .select({
+      id: transactions.id,
+      amount: transactions.amount,
+      primary: transactions.categoryPrimary,
+      detailed: transactions.categoryDetailed,
+      kind: transactions.kind,
+      tag: transactions.transferTag,
+      accountType: accounts.type,
+      accountSubtype: accounts.subtype,
+    })
+    .from(transactions)
+    .innerJoin(accounts, eq(accounts.id, transactions.accountId))
+    .all();
+  let changed = 0;
+  db.transaction((tx) => {
+    for (const r of rows) {
+      const c = classify(r.amount, r.primary, r.detailed, { accountType: r.accountType, accountSubtype: r.accountSubtype });
+      if (c.kind === r.kind && c.tag === r.tag) continue;
+      tx.update(transactions).set({ kind: c.kind, transferTag: c.tag }).where(eq(transactions.id, r.id)).run();
+      changed++;
+    }
+  });
+  return changed;
+}
+
+/** How far apart (days) the two sides of a card payment may post. */
+export const PAIR_WINDOW_DAYS = 5;
+
+const dayNumber = (iso: string) => Math.round(Date.UTC(+iso.slice(0, 4), +iso.slice(5, 7) - 1, +iso.slice(8, 10)) / 86_400_000);
+const cents = (x: number) => Math.round(x * 100);
+
+/**
+ * Flag card payments that leave a bank account with nothing arriving on a linked card or
+ * loan: an equal, opposite amount on a credit/loan account within PAIR_WINDOW_DAYS. Each
+ * receipt pairs with at most one payment (closest date first). Pending payments are never
+ * flagged; their other side may simply not have posted yet. Recomputed from scratch every
+ * sync, so it is idempotent. Returns how many payments are unmatched.
+ */
+export function pairCardPayments(db: Db): number {
+  const rows = db
+    .select({
+      id: transactions.id,
+      date: transactions.date,
+      amount: transactions.amount,
+      pending: transactions.pending,
+      tag: transactions.transferTag,
+      unmatched: transactions.unmatched,
+      accountType: accounts.type,
+    })
+    .from(transactions)
+    .innerJoin(accounts, eq(accounts.id, transactions.accountId))
+    .orderBy(transactions.date, transactions.id)
+    .all();
+
+  // Receipts on liability accounts, by amount in cents, each with a "used" flag.
+  const receipts = new Map<number, { day: number; used: boolean }[]>();
+  for (const r of rows) {
+    if (r.amount > 0 && isLiabilityType(r.accountType)) {
+      const k = cents(r.amount);
+      const list = receipts.get(k) ?? [];
+      list.push({ day: dayNumber(r.date), used: false });
+      receipts.set(k, list);
+    }
+  }
+
+  const want = new Map<string, boolean>();
+  for (const r of rows) {
+    if (r.tag !== "card_payment" || r.amount >= 0 || isLiabilityType(r.accountType) || r.pending) continue;
+    const day = dayNumber(r.date);
+    let best: { day: number; used: boolean } | null = null;
+    for (const c of receipts.get(cents(-r.amount)) ?? []) {
+      if (c.used || Math.abs(c.day - day) > PAIR_WINDOW_DAYS) continue;
+      if (!best || Math.abs(c.day - day) < Math.abs(best.day - day)) best = c;
+    }
+    if (best) best.used = true;
+    else want.set(r.id, true);
+  }
+
+  db.transaction((tx) => {
+    for (const r of rows) {
+      const flag = want.get(r.id) ?? false;
+      if (flag !== r.unmatched) tx.update(transactions).set({ unmatched: flag }).where(eq(transactions.id, r.id)).run();
+    }
+  });
+  return want.size;
 }
 
 async function pullHoldings(deps: SyncDeps, accessToken: string, nowIso: string): Promise<number> {

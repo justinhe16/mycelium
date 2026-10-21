@@ -16,7 +16,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Panel, PanelEmpty } from "@/components/workspace/panel";
 import { api } from "@/lib/api-client";
-import { categoryLabel, KINDS, type Kind } from "@/lib/classify";
+import { categoryLabel, KINDS, type Kind, type TransferTag } from "@/lib/classify";
 import { addDays, formatDay } from "@/lib/dates";
 import { money } from "@/lib/format";
 import {
@@ -40,6 +40,13 @@ export const KIND_STYLES: Record<Kind, string> = {
 };
 
 const KIND_LABELS: Record<Kind, string> = { income: "Income", spend: "Spend", refund: "Refund", transfer: "Transfer" };
+
+/** What a transfer pill says, by tag. */
+const TRANSFER_TAG_LABELS: Record<TransferTag, string> = {
+  card_payment: "Card payment",
+  invest: "Investing",
+  internal: "Transfer",
+};
 
 const PENDING_OPTIONS: { value: PendingMode; label: string }[] = [
   { value: "include", label: "Posted + pending" },
@@ -293,8 +300,22 @@ export function LedgerPanel({ snapshot, version, initialParams, section }: Props
             </span>
           </>
         )}
-        {!query.kinds.length && (
-          <span className="ml-auto text-[11px] italic">Includes transfers; filter Type to exclude them.</span>
+        {page && page.transfers.moved + Math.abs(page.transfers.invested) + page.transfers.unmatched.count > 0 && (
+          <span
+            className="ml-auto"
+            title="Money moved between your own accounts, counted once on the sending side. Not part of In or Out."
+          >
+            Transfers <span className="text-violet-700 dark:text-violet-400">{money(page.transfers.moved)}</span>
+            <span className="text-[11px]"> (moved between your accounts)</span>
+            {page.transfers.invested !== 0 && <> · invested {money(page.transfers.invested)}</>}
+            {page.transfers.cardPayments > 0 && <> · card payments {money(page.transfers.cardPayments)}</>}
+            {page.transfers.unmatched.count > 0 && (
+              <span className="text-amber-700 dark:text-amber-400">
+                {" "}
+                · {page.transfers.unmatched.count} to a card not linked ({money(page.transfers.unmatched.total)})
+              </span>
+            )}
+          </span>
         )}
       </div>
 
@@ -361,6 +382,14 @@ export function LedgerPanel({ snapshot, version, initialParams, section }: Props
                         pending
                       </span>
                     )}
+                    {r.unmatched && (
+                      <span
+                        className="ml-2 rounded border border-amber-500/40 px-1 py-px text-[10px] font-medium text-amber-700 uppercase dark:text-amber-400"
+                        title="No matching payment arrived on a linked card or loan. Link that card to pair it."
+                      >
+                        card not linked
+                      </span>
+                    )}
                   </span>
                   {r.description !== r.rawName && (
                     <span className="text-muted-foreground block truncate text-[11px]">{r.rawName}</span>
@@ -377,7 +406,7 @@ export function LedgerPanel({ snapshot, version, initialParams, section }: Props
                   <span
                     className={cn("inline-flex rounded-full px-2 py-0.5 text-[11px] font-medium", KIND_STYLES[r.kind])}
                   >
-                    {KIND_LABELS[r.kind]}
+                    {r.kind === "transfer" && r.transferTag ? TRANSFER_TAG_LABELS[r.transferTag] : KIND_LABELS[r.kind]}
                   </span>
                 </td>
                 <td className="border-border/40 border-b px-3 py-2">

@@ -1,6 +1,8 @@
 import { sql } from "drizzle-orm";
 import { index, integer, primaryKey, real, sqliteTable, text } from "drizzle-orm/sqlite-core";
 
+import { KINDS, TRANSFER_TAGS } from "../classify";
+
 /*
  * Money is stored as REAL dollars (what Plaid returns) so ad-hoc SQL from agents
  * reads naturally. Transaction amounts are normalized: positive = money in.
@@ -67,7 +69,11 @@ export const transactions = sqliteTable(
     categoryPrimary: text("category_primary"),
     categoryDetailed: text("category_detailed"),
     paymentChannel: text("payment_channel"),
-    kind: text("kind", { enum: ["income", "spend", "refund", "transfer"] }).notNull(),
+    kind: text("kind", { enum: KINDS }).notNull(),
+    /** For kind = transfer: card_payment | invest | internal (see src/lib/classify.ts). */
+    transferTag: text("transfer_tag", { enum: TRANSFER_TAGS }),
+    /** A card payment out of a bank account with no matching receipt on a linked card or loan. */
+    unmatched: integer("unmatched", { mode: "boolean" }).notNull().default(false),
     createdAt: text("created_at").notNull(),
     updatedAt: text("updated_at").notNull(),
   },
