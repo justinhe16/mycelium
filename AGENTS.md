@@ -32,7 +32,7 @@ stored, change the sync code instead.
 
 | View | One row per | Key columns |
 | --- | --- | --- |
-| `v_ledger` | transaction, from every account | `date`, `description`, `amount`, `inflow`, `outflow`, `kind`, `category_primary`, `category_detailed`, `pending`, `account_name`, `account_mask`, `account_type`, `institution_name` |
+| `v_ledger` | transaction, from every account | `date`, `description`, `amount`, `inflow`, `outflow`, `kind`, `transfer_tag`, `unmatched`, `category_primary`, `category_detailed`, `pending`, `account_name`, `account_mask`, `account_type`, `institution_name` |
 | `v_accounts` | account | `institution_name`, `name`, `type`, `subtype`, `current_balance`, `is_liability`, `hidden`, `net_contribution` |
 | `v_net_worth_daily` | recorded day | `day`, `assets`, `liabilities`, `net_worth` (hidden accounts excluded) |
 | `v_monthly_cashflow` | month × kind (posted only) | `month` (YYYY-MM), `kind`, `net`, `inflow`, `outflow`, `transactions` |
@@ -46,14 +46,26 @@ ticker, quantity, value, cost_basis), `daily_snapshots` (account × day balances
   of Plaid's raw convention.
 - **Money** is REAL dollars, and `currency` is usually USD. Round when presenting.
 - **Dates** are `YYYY-MM-DD` text, so string comparison works: `date >= '2026-01-01'`.
-- **`kind`:**
+- **`kind`** (set by `src/lib/classify.ts`, re-applied to every row on each sync):
   - `income`: paychecks, interest, dividends.
-  - `spend`: money out to the world, including rent and non-card loan payments.
-  - `refund`: money back from a merchant.
-  - `transfer`: moving money between the user's own accounts, including credit card payments.
+  - `spend`: money out to the world, including rent, non-card loan payments, and Venmo / Zelle /
+    app payments out (`TRANSFER_OUT_TRANSFER_OUT_FROM_APPS`).
+  - `refund`: money back from a merchant, and Venmo / Zelle / app money in
+    (`TRANSFER_IN_TRANSFER_IN_FROM_APPS`, e.g. a friend paying you back). Refunds lower spend.
+  - `transfer`: moving money between the user's own accounts. `transfer_tag` says which:
+    - `card_payment`: paying a credit card or loan, on both sides: the checking side
+      (`LOAN_PAYMENTS_CREDIT_CARD_PAYMENT`) and the card side (money in on a credit or loan
+      account under `LOAN_DISBURSEMENTS`, `LOAN_PAYMENTS` or `TRANSFER_IN`; Chase sends
+      `LOAN_DISBURSEMENTS_OTHER_DISBURSEMENT`).
+    - `invest`: to or from an investment or retirement account (`*_INVESTMENT_AND_RETIREMENT_FUNDS`,
+      or any row on an investment account). Net invested = `-sum(amount)` over these.
+    - `internal`: any other `TRANSFER_IN` / `TRANSFER_OUT`.
 
   **Exclude `transfer` from income and spend totals.** Otherwise a card payment counts twice:
   once as the purchases on the card, and again as the payment from checking.
+- **`unmatched = 1`** marks a card payment out of a bank account with no equal receipt on a linked
+  card or loan within 5 days: the card isn't linked (or its side hasn't posted yet). It is still a
+  transfer. Pending payments are never flagged.
 - **Pending** rows (`pending = 1`) may still change or disappear. Exclude them for settled totals.
 - **Categories** are Plaid's personal-finance categories. `category_primary` is coarse, like
   `FOOD_AND_DRINK`; `category_detailed` is finer, like `FOOD_AND_DRINK_COFFEE`. NULL means
@@ -74,6 +86,10 @@ FROM v_ledger
 WHERE kind = 'spend' AND pending = 0
   AND date >= date('now', 'start of month', '-1 month') AND date < date('now', 'start of month')
 GROUP BY 1 ORDER BY spent DESC;
+
+-- Invested this year (net into investment accounts)
+SELECT round(-sum(amount), 2) AS invested FROM v_ledger
+WHERE transfer_tag = 'invest' AND pending = 0 AND date >= strftime('%Y-01-01','now');
 
 -- Savings rate by month
 SELECT month,

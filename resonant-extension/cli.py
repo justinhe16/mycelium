@@ -4,7 +4,9 @@
 Every command opens mycelium's SQLite file read-only (``mode=ro`` plus ``query_only``) and
 prints one JSON object on stdout. Nothing here writes to the database: Plaid is the source
 of truth and mycelium's own sync owns every write. See ../AGENTS.md for the data's
-conventions (amount > 0 is money in; transfers are not income or spend).
+conventions (amount > 0 is money in; transfers are not income or spend; Venmo / Zelle
+payments out are spend and paybacks are refunds; transfer_tag says card_payment, invest or
+internal; unmatched = 1 marks a card payment with no receipt on a linked card).
 
 Where the database is, first match wins:
 1. ``$MYCELIUM_DB`` (for running by hand; Resonant builds the environment from scratch).
@@ -278,7 +280,10 @@ def spending_summary(conn: sqlite3.Connection, period: str, today: date) -> Dict
         "SELECT sum(CASE WHEN kind = 'income' THEN amount ELSE 0 END) AS income,"
         " -sum(CASE WHEN kind IN ('spend', 'refund') THEN amount ELSE 0 END) AS spend,"
         " sum(CASE WHEN kind = 'refund' THEN amount ELSE 0 END) AS refunds,"
-        " count(CASE WHEN kind IN ('spend', 'refund') THEN 1 END) AS n"
+        " count(CASE WHEN kind IN ('spend', 'refund') THEN 1 END) AS n,"
+        " -sum(CASE WHEN transfer_tag = 'invest' THEN amount ELSE 0 END) AS invested,"
+        " count(CASE WHEN unmatched = 1 THEN 1 END) AS unmatched_n,"
+        " -sum(CASE WHEN unmatched = 1 THEN amount ELSE 0 END) AS unmatched_total"
         f" FROM v_ledger WHERE {posted}",
         span,
     )
@@ -316,9 +321,18 @@ def spending_summary(conn: sqlite3.Connection, period: str, today: date) -> Dict
         "refunds": money(totals["refunds"] or 0.0),
         "net": money(income - spend),
         "spend_transactions": totals["n"],
+        # Transfers stay out of income and spend; these two are reported beside them.
+        "invested": money(totals["invested"] or 0.0),
+        "unmatched_card_payments": {
+            "count": totals["unmatched_n"],
+            "total": money(totals["unmatched_total"] or 0.0),
+        },
         "by_category": by_category,
         "top_merchants": merchants,
-        "note": "posted only; spend is net of refunds; transfers (card payments, moves between your accounts) excluded",
+        "note": "posted only; spend is net of refunds (Venmo / Zelle paybacks count as refunds,"
+        " payments out as spend); transfers (card payments, investing, moves between your"
+        " accounts) excluded; invested is net money into investment accounts;"
+        " unmatched_card_payments went to a card or loan that isn't linked",
     }
     if pending["n"]:
         out["pending"] = {"count": pending["n"], "spend": money(pending["spent"])}
@@ -519,13 +533,16 @@ def daily_summary(
         conn,
         "SELECT count(*) AS n,"
         " -sum(CASE WHEN t.kind IN ('spend', 'refund') THEN t.amount ELSE 0 END) AS spent,"
-        " sum(CASE WHEN t.kind = 'income' THEN t.amount ELSE 0 END) AS income"
+        " sum(CASE WHEN t.kind = 'income' THEN t.amount ELSE 0 END) AS income,"
+        " -sum(CASE WHEN t.transfer_tag = 'invest' THEN t.amount ELSE 0 END) AS invested,"
+        " count(CASE WHEN t.unmatched = 1 THEN 1 END) AS unmatched"
         " FROM transactions t JOIN accounts a ON a.id = t.account_id"
         " JOIN plaid_items i ON i.id = a.item_id"
         " WHERE t.created_at > ? AND t.pending = 0 AND i.created_at <= ?",
         (seen, seen),
     )
     new_n, spent, income = new["n"], new["spent"] or 0.0, new["income"] or 0.0
+    invested, unmatched = new["invested"] or 0.0, new["unmatched"]
     linked = one(conn, "SELECT count(*) AS n FROM plaid_items WHERE created_at > ?", (seen,))["n"]
     newest = one(conn, "SELECT max(created_at) AS at FROM transactions")["at"]
 
@@ -565,9 +582,13 @@ def daily_summary(
             money_bits.append(f"{short_money(spent)} spent")
         if income >= 1:
             money_bits.append(f"{short_money(income)} in")
+        if abs(invested) >= 1:
+            money_bits.append(f"{short_money(invested)} invested")
         if money_bits:
             txn += ", " + ", ".join(money_bits)
         parts.append(txn)
+    if unmatched:
+        parts.append(f"{unmatched} card payment{'s' if unmatched != 1 else ''} to a card that isn't linked")
     if linked:
         parts.append(f"{linked} new login{'s' if linked != 1 else ''} linked")
 

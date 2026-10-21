@@ -216,6 +216,61 @@ class Tools(Base):
         self.assertEqual(out["income"], 8000.0)
 
 
+class Calibrated(Base):
+    """Transfer tags and unmatched card payments, as mycelium's sync classifies them."""
+
+    def add(self, tid: str, account: str, day: str, name: str, amount: float, kind: str,
+            tag: str | None = None, unmatched: int = 0, pending: int = 0,
+            created: datetime = NOW) -> None:
+        self.rw.execute(
+            "INSERT INTO transactions (id, account_id, date, name, amount, pending, kind, transfer_tag,"
+            " unmatched, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (tid, account, day, name, amount, pending, kind, tag, unmatched, ts(created), ts(created)),
+        )
+        self.rw.commit()
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.rw.execute("UPDATE transactions SET transfer_tag = 'card_payment' WHERE id = 't6'")
+        self.add("c1", "card", "2026-10-10", "PAYMENT THANK YOU", 1500.0, "transfer", "card_payment")
+        self.add("i1", "chk", "2026-10-11", "ROBINHOOD", -700.0, "transfer", "invest")
+        self.add("i2", "chk", "2026-10-12", "ROBINHOOD WITHDRAWAL", 200.0, "transfer", "invest")
+        self.add("u1", "chk", "2026-10-13", "OTHER CARD AUTOPAY", -310.0, "transfer", "card_payment", unmatched=1)
+        self.add("v1", "chk", "2026-10-14", "VENMO", -60.0, "spend")
+        self.add("v2", "chk", "2026-10-15", "VENMO", 25.0, "refund")
+        self.add("i3", "chk", "2026-10-16", "ROBINHOOD", -50.0, "transfer", "invest", pending=1)
+
+    def test_spending_summary_reports_invested_and_unmatched(self) -> None:
+        out = cli.spending_summary(self.conn, "this_month", TODAY)
+        # The base month's 2186.5, plus Venmo out 60, less the 25 payback; transfers stay out.
+        self.assertEqual(out["spend"], 2221.5)
+        self.assertEqual(out["refunds"], 45.0)
+        self.assertEqual(out["income"], 4000.0)
+        self.assertEqual(out["invested"], 500.0)  # 700 in, 200 back out; the pending 50 left out
+        self.assertEqual(out["unmatched_card_payments"], {"count": 1, "total": 310.0})
+
+    def test_spending_summary_without_any(self) -> None:
+        out = cli.spending_summary(self.conn, "2026-09", TODAY)
+        self.assertEqual(out["invested"], 0.0)
+        self.assertEqual(out["unmatched_card_payments"], {"count": 0, "total": 0.0})
+
+    def test_search_and_merchants_keep_transfers_out(self) -> None:
+        out = cli.search_transactions(self.conn, "robinhood", "this_month", TODAY)
+        self.assertEqual(out["count"], 0)
+        self.assertEqual(out["transfers_excluded"], {"count": 3, "net": -550.0})
+        venmo = cli.search_transactions(self.conn, "venmo", "this_month", TODAY)
+        self.assertEqual((venmo["count"], venmo["net"]), (2, -35.0))
+        merchants = {m["merchant"]: m for m in cli.merchant_totals(self.conn, "this_month", 25, TODAY)["merchants"]}
+        self.assertEqual(merchants["VENMO"], {"merchant": "VENMO", "spent": 35.0, "count": 2})
+        self.assertNotIn("ROBINHOOD", merchants)
+        self.assertNotIn("OTHER CARD AUTOPAY", merchants)
+
+    def test_daily_mentions_invested_and_unmatched(self) -> None:
+        out = cli.daily_summary(self.conn, NOW + timedelta(hours=1), {"seen": ts(NOW - timedelta(hours=1))})
+        self.assertIn("$500 invested", out["title"])
+        self.assertIn("1 card payment to a card that isn't linked", out["title"])
+
+
 class Search(Base):
     def add(self, tid: str, day: str, name: str, amount: float, merchant: str | None = None,
             kind: str = "spend", category: str | None = None) -> None:

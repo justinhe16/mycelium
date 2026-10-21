@@ -51,6 +51,8 @@ export function queryLedger(db: Db, q: LedgerQuery): LedgerPage {
       amount: transactions.amount,
       currency: transactions.isoCurrency,
       kind: transactions.kind,
+      transferTag: transactions.transferTag,
+      unmatched: transactions.unmatched,
       categoryPrimary: transactions.categoryPrimary,
       categoryDetailed: transactions.categoryDetailed,
       pending: transactions.pending,
@@ -70,11 +72,20 @@ export function queryLedger(db: Db, q: LedgerQuery): LedgerPage {
     .offset((q.page - 1) * q.pageSize)
     .all();
 
+  // In/Out leave transfers out (a move between your own accounts would count on both sides);
+  // transfers are totalled separately, on the sending side.
+  const amt = transactions.amount;
+  const isTransfer = sql`${transactions.kind} = 'transfer'`;
   const agg = db
     .select({
       total: sql<number>`count(*)`,
-      inflow: sql<number>`coalesce(sum(case when ${transactions.amount} > 0 then ${transactions.amount} else 0 end), 0)`,
-      outflow: sql<number>`coalesce(sum(case when ${transactions.amount} < 0 then -${transactions.amount} else 0 end), 0)`,
+      inflow: sql<number>`coalesce(sum(case when not ${isTransfer} and ${amt} > 0 then ${amt} else 0 end), 0)`,
+      outflow: sql<number>`coalesce(sum(case when not ${isTransfer} and ${amt} < 0 then -${amt} else 0 end), 0)`,
+      moved: sql<number>`coalesce(sum(case when ${isTransfer} and ${amt} < 0 then -${amt} else 0 end), 0)`,
+      invested: sql<number>`coalesce(-sum(case when ${transactions.transferTag} = 'invest' then ${amt} else 0 end), 0)`,
+      cardPayments: sql<number>`coalesce(sum(case when ${transactions.transferTag} = 'card_payment' and ${amt} < 0 then -${amt} else 0 end), 0)`,
+      unmatchedCount: sql<number>`count(case when ${transactions.unmatched} = 1 then 1 end)`,
+      unmatchedTotal: sql<number>`coalesce(sum(case when ${transactions.unmatched} = 1 then -${amt} else 0 end), 0)`,
     })
     .from(transactions)
     .innerJoin(accounts, eq(accounts.id, transactions.accountId))
@@ -86,6 +97,12 @@ export function queryLedger(db: Db, q: LedgerQuery): LedgerPage {
     total: agg.total,
     inflow: agg.inflow,
     outflow: agg.outflow,
+    transfers: {
+      moved: agg.moved,
+      invested: agg.invested,
+      cardPayments: agg.cardPayments,
+      unmatched: { count: agg.unmatchedCount, total: agg.unmatchedTotal },
+    },
     page: q.page,
     pageSize: q.pageSize,
   };

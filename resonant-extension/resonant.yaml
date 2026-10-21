@@ -27,9 +27,10 @@ tools:
     args: {days: integer}
   spending_summary:
     description: >-
-      Income, spend, top categories and merchants for a period, transfers excluded: this_month,
-      last_month, last_7_days, last_30_days, last_12_months, ytd, all, YYYY-MM, or
-      YYYY-MM-DD..YYYY-MM-DD.
+      Income, spend (net of refunds; Venmo/Zelle paybacks are refunds), top categories and
+      merchants for a period, transfers excluded; also invested (net into investment accounts)
+      and unmatched_card_payments (to a card that isn't linked): this_month, last_month,
+      last_7_days, last_30_days, last_12_months, ytd, all, YYYY-MM, or YYYY-MM-DD..YYYY-MM-DD.
     run: ./cli.py spending_summary --period {period}
     effect: read
     args: {period: string}
@@ -44,8 +45,9 @@ tools:
     args: {query: string, period: string}
   merchant_totals:
     description: >-
-      Spend (net of refunds) and income per merchant for a period (as spending_summary), biggest
-      spend first, with counts; limit 1-100 merchants (use 25 if unsure). Transfers excluded.
+      Spend (net of refunds, so Venmo paybacks offset Venmo spend) and income per merchant for a
+      period (as spending_summary), biggest spend first, with counts; limit 1-100 merchants (use
+      25 if unsure). Transfers excluded.
     run: ./cli.py merchant_totals --period={period} --limit={limit}
     effect: read
     args: {period: string, limit: integer}

@@ -81,8 +81,10 @@ db.transaction((tx) => {
     ["Equinox", "PERSONAL_CARE", "PERSONAL_CARE_GYMS_AND_FITNESS_CENTERS", 260, 260],
     ["Delta Air Lines", "TRAVEL", "TRAVEL_FLIGHTS", 180, 540],
   ];
+  const typeOf = new Map(accts.map((a) => [a.id, { accountType: a.type, accountSubtype: a.subtype }]));
   let n = 0;
   const add = (accountId: string, date: string, name: string, amount: number, primary: string | null, detailed: string | null, pending = false) => {
+    const c = classify(amount, primary, detailed, typeOf.get(accountId));
     tx.insert(transactions)
       .values({
         id: `demo-t${++n}`,
@@ -96,7 +98,8 @@ db.transaction((tx) => {
         categoryPrimary: primary,
         categoryDetailed: detailed,
         paymentChannel: "online",
-        kind: classify(amount, primary, detailed),
+        kind: c.kind,
+        transferTag: c.tag,
         createdAt: now,
         updatedAt: now,
       })
@@ -128,6 +131,18 @@ db.transaction((tx) => {
         bal["demo-chk"] -= pay;
         bal[card] = 0;
       }
+    }
+    if (dom === 10) {
+      add("demo-chk", day, "Robinhood", -500, "TRANSFER_OUT", "TRANSFER_OUT_INVESTMENT_AND_RETIREMENT_FUNDS");
+      bal["demo-chk"] -= 500;
+      const paid = money(30, 90);
+      add("demo-chk", day, "Venmo", -paid, "TRANSFER_OUT", "TRANSFER_OUT_TRANSFER_OUT_FROM_APPS");
+      bal["demo-chk"] -= paid;
+    }
+    if (dom === 12) {
+      const back = money(15, 45);
+      add("demo-chk", day, "Venmo", back, "TRANSFER_IN", "TRANSFER_IN_TRANSFER_IN_FROM_APPS");
+      bal["demo-chk"] += back;
     }
     if (dom === 28) {
       add("demo-sav", day, "Interest Payment", money(18, 26), "INCOME", "INCOME_INTEREST_EARNED");
