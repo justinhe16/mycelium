@@ -301,21 +301,30 @@ export function LedgerPanel({ snapshot, version, initialParams, section }: Props
           </>
         )}
         {page && page.transfers.moved + Math.abs(page.transfers.invested) + page.transfers.unmatched.count > 0 && (
-          <span
-            className="ml-auto"
-            title="Money moved between your own accounts, counted once on the sending side. Not part of In or Out."
-          >
-            Transfers <span className="text-violet-700 dark:text-violet-400">{money(page.transfers.moved)}</span>
-            <span className="text-[11px]"> (moved between your accounts)</span>
-            {page.transfers.invested !== 0 && <> · invested {money(page.transfers.invested)}</>}
-            {page.transfers.cardPayments > 0 && <> · card payments {money(page.transfers.cardPayments)}</>}
-            {page.transfers.unmatched.count > 0 && (
-              <span className="text-amber-700 dark:text-amber-400">
-                {" "}
-                · {page.transfers.unmatched.count} to a card not linked ({money(page.transfers.unmatched.total)})
+          // One flex item per figure, like In / Out / Net, so the row spaces and wraps them the same way.
+          <>
+            <span title="Money moved between your own accounts, counted once on the sending side. Not part of In or Out.">
+              <span className="whitespace-nowrap">
+                Transfers <span className="text-violet-700 dark:text-violet-400">{money(page.transfers.moved)}</span>
+              </span>{" "}
+              <span className="whitespace-nowrap">(moved between your accounts)</span>
+            </span>
+            {page.transfers.invested !== 0 && (
+              <span className="whitespace-nowrap">
+                Invested <span className="text-foreground">{money(page.transfers.invested)}</span>
               </span>
             )}
-          </span>
+            {page.transfers.cardPayments > 0 && (
+              <span className="whitespace-nowrap">
+                Card payments <span className="text-foreground">{money(page.transfers.cardPayments)}</span>
+              </span>
+            )}
+            {page.transfers.unmatched.count > 0 && (
+              <span className="whitespace-nowrap text-amber-700 dark:text-amber-400">
+                {page.transfers.unmatched.count} to a card not linked ({money(page.transfers.unmatched.total)})
+              </span>
+            )}
+          </>
         )}
       </div>
 
