@@ -16,6 +16,7 @@
     "launchd:uninstall": "tsx scripts/launchd.ts uninstall",
     "test": "vitest run",
     "test:watch": "vitest",
+    "test:resonant": "python3 -m unittest discover -s resonant-extension/tests",
     "sandbox:link": "tsx scripts/sandbox-link.ts",
     "demo": "DATABASE_PATH=data/demo.db tsx scripts/seed-demo.ts && DATABASE_PATH=data/demo.db next dev -H 127.0.0.1 -p 3002",
     "demo:seed": "DATABASE_PATH=data/demo.db tsx scripts/seed-demo.ts"

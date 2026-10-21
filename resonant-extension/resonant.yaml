@@ -1,0 +1,48 @@
+# mycelium: your money, read-only, from mycelium's local SQLite mirror of Plaid.
+# Stdlib Python only. Every command opens the database read-only and never writes; the
+# results (bank, account and merchant names) are outside content, so they taint the task.
+name: mycelium
+version: 1
+description: Your money from mycelium; net worth, account balances, transactions, spending.
+examples:
+  - what's my net worth?
+  - how much did I spend last month?
+  - show my transactions from the last 3 days
+# No approvers and no secrets: every tool and job is an L0 read, and only the owner may
+# approve anything. Grant nobody `request` for mycelium in principals.yaml (owner-only).
+
+tools:
+  net_worth:
+    description: Net worth now (assets minus liabilities) with its change over 1 day, 30 days and the year.
+    run: ./cli.py net_worth
+    effect: read                       # read, no secrets: always L0
+  account_balances:
+    description: Every linked account with its current balance; credit and loan balances are amounts owed.
+    run: ./cli.py account_balances
+    effect: read
+  recent_transactions:
+    description: Transactions from the last N days (1-90), newest first, at most 30 shown; amount > 0 is money in.
+    run: ./cli.py recent_transactions --days {days}
+    effect: read
+    args: {days: integer}
+  spending_summary:
+    description: >-
+      Income, spend, top categories and merchants for a period, transfers excluded: this_month,
+      last_month, last_7_days, last_30_days, ytd, YYYY-MM, or YYYY-MM-DD..YYYY-MM-DD.
+    run: ./cli.py spending_summary --period {period}
+    effect: read
+    args: {period: string}
+
+jobs:
+  # mycelium's launchd sync runs at 07:00 (npm run launchd:install); summarize after it.
+  - id: daily
+    schedule: "20 7 * * *"
+    run: ./cli.py daily
+    effect: read
+    level: L0
+    timeout_s: 60
+    catchup: 2h
+
+# Normal: the daily summary joins the next hourly pulse; it never texts on its own.
+report: {max_urgency: normal}
+health: {check: ./cli.py health, every: 30m}
