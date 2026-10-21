@@ -38,7 +38,11 @@ MOVE_PCT = 0.005
 MARK_FILE = "daily.json"  # in $RESONANT_EXT_DATA: what the daily job last told
 MAX_DAYS = 90
 MAX_ROWS = 30  # the model sees at most 4 KB of a result, so keep lists short
+SEARCH_ROWS = 25  # search rows carry totals ahead of them; keep the whole result under 4 KB
+MAX_QUERY = 64
+MERCHANT_LIMIT, MAX_MERCHANT_LIMIT = 25, 100
 TOP_N = 8
+ALL_START = date(1900, 1, 1)  # period "all": every row mycelium has
 
 
 class UserError(Exception):
@@ -85,7 +89,8 @@ def one(conn: sqlite3.Connection, sql: str, params: Tuple[Any, ...] = ()) -> Opt
 
 
 def money(x: Optional[float]) -> Optional[float]:
-    return None if x is None else round(x, 2)
+    # + 0.0 turns -0.0 (refunds that cancel the spend exactly) into 0.0
+    return None if x is None else round(x, 2) + 0.0
 
 
 def iso_utc(dt: datetime) -> str:
@@ -218,7 +223,10 @@ def recent_transactions(conn: sqlite3.Connection, days: int, today: date) -> Dic
 
 _MONTH = re.compile(r"^(\d{4})-(\d{2})$")
 _RANGE = re.compile(r"^(\d{4}-\d{2}-\d{2})\.\.(\d{4}-\d{2}-\d{2})$")
-PERIODS = "this_month, last_month, last_7_days, last_30_days, ytd, YYYY-MM, or YYYY-MM-DD..YYYY-MM-DD"
+PERIODS = (
+    "this_month, last_month, last_7_days, last_30_days, last_12_months, ytd, all, YYYY-MM,"
+    " or YYYY-MM-DD..YYYY-MM-DD"
+)
 
 
 def period_range(period: str, today: date) -> Tuple[date, date]:
@@ -233,8 +241,12 @@ def period_range(period: str, today: date) -> Tuple[date, date]:
     if p in ("last_7_days", "last_30_days"):
         n = 7 if p == "last_7_days" else 30
         return today - timedelta(days=n - 1), today
+    if p == "last_12_months":  # the 365 days ending today
+        return today - timedelta(days=364), today
     if p == "ytd":
         return date(today.year, 1, 1), today
+    if p == "all":
+        return ALL_START, today
     m = _MONTH.match(p)
     if m:
         try:
@@ -297,7 +309,7 @@ def spending_summary(conn: sqlite3.Connection, period: str, today: date) -> Dict
     income, spend = totals["income"] or 0.0, totals["spend"] or 0.0
     out: Dict[str, Any] = {
         "period": period,
-        "start": span[0],
+        "start": shown_start(start),
         "end": span[1],
         "income": money(income),
         "spend": money(spend),
@@ -310,6 +322,163 @@ def spending_summary(conn: sqlite3.Connection, period: str, today: date) -> Dict
     }
     if pending["n"]:
         out["pending"] = {"count": pending["n"], "spend": money(pending["spent"])}
+    return out
+
+
+def shown_start(start: date) -> Optional[str]:
+    """The period's first day as shown; None for ``all`` (there is no real first day)."""
+    return None if start == ALL_START else start.isoformat()
+
+
+def fold(value: Optional[str]) -> Optional[str]:
+    """Case folding for matching. SQLite's lower() only folds ASCII; this folds everything."""
+    return value.casefold() if isinstance(value, str) else value
+
+
+def search_transactions(conn: sqlite3.Connection, query: str, period: str, today: date) -> Dict[str, Any]:
+    """Every transaction whose merchant, name or category contains ``query``, in ``period``.
+
+    Totals are posted rows only and cover every match; at most SEARCH_ROWS rows are listed.
+    Transfers are left out (as in spending_summary) and counted separately.
+    """
+    q = query.strip()
+    if not 1 <= len(q) <= MAX_QUERY:
+        raise UserError(f"query must be 1..{MAX_QUERY} characters")
+    start, end = period_range(period, today)
+    conn.create_function("fold", 1, fold, deterministic=True)
+    needle = q.casefold()
+    # "food and drink" finds FOOD_AND_DRINK: categories use underscores for spaces.
+    cat_needle = "_".join(needle.split())
+    match = (
+        "date >= ? AND date <= ? AND ("
+        " instr(fold(raw_name), ?) > 0 OR instr(fold(coalesce(merchant_name, '')), ?) > 0"
+        " OR instr(fold(coalesce(category_primary, '')), ?) > 0"
+        " OR instr(fold(coalesce(category_detailed, '')), ?) > 0)"
+    )
+    params = (start.isoformat(), end.isoformat(), needle, needle, cat_needle, cat_needle)
+    totals = one(
+        conn,
+        "SELECT count(*) AS n, sum(inflow) AS money_in, sum(outflow) AS money_out,"
+        " min(date) AS first, max(date) AS last"
+        f" FROM v_ledger WHERE pending = 0 AND kind != 'transfer' AND {match}",
+        params,
+    )
+    pending = one(
+        conn,
+        "SELECT count(*) AS n, sum(inflow) AS money_in, sum(outflow) AS money_out"
+        f" FROM v_ledger WHERE pending = 1 AND kind != 'transfer' AND {match}",
+        params,
+    )
+    transfers = one(
+        conn,
+        f"SELECT count(*) AS n, sum(amount) AS net FROM v_ledger WHERE kind = 'transfer' AND {match}",
+        params,
+    )
+    rows = conn.execute(
+        "SELECT date, description, amount, kind, pending, account_name, account_mask"
+        f" FROM v_ledger WHERE kind != 'transfer' AND {match}"
+        " ORDER BY date DESC, pending DESC, abs(amount) DESC, transaction_id LIMIT ?",
+        params + (SEARCH_ROWS,),
+    ).fetchall()
+    money_in, money_out = totals["money_in"] or 0.0, totals["money_out"] or 0.0
+    listed = totals["n"] + pending["n"]
+    # Totals first: the model sees at most 4 KB, so they must survive a cut.
+    out: Dict[str, Any] = {
+        "query": q,
+        "period": period,
+        "start": shown_start(start),
+        "end": end.isoformat(),
+        "count": totals["n"],
+        "money_in": money(money_in),
+        "money_out": money(money_out),
+        "net": money(money_in - money_out),
+        "first_date": totals["first"],
+        "last_date": totals["last"],
+        "transfers_included": False,
+    }
+    if pending["n"]:
+        out["pending"] = {
+            "count": pending["n"],
+            "money_in": money(pending["money_in"] or 0.0),
+            "money_out": money(pending["money_out"] or 0.0),
+        }
+    if transfers["n"]:
+        out["transfers_excluded"] = {"count": transfers["n"], "net": money(transfers["net"] or 0.0)}
+    txns = []
+    for r in rows:
+        t: Dict[str, Any] = {
+            "date": r["date"],
+            "description": r["description"],
+            "amount": money(r["amount"]),
+            "kind": r["kind"],
+            "account": r["account_name"] + (f" ··{r['account_mask']}" if r["account_mask"] else ""),
+        }
+        if r["pending"]:
+            t["pending"] = True
+        txns.append(t)
+    out["shown"] = len(txns)
+    out["truncated"] = listed > len(txns)
+    note = (
+        "case-insensitive match on merchant, name and category; totals are posted only;"
+        " amount > 0 is money in; transfers between your own accounts excluded"
+    )
+    if out["truncated"]:
+        note += f"; showing the newest {len(txns)} of {listed} rows, but the totals cover all {totals['n']} posted matches"
+    out["note"] = note
+    out["transactions"] = txns
+    return out
+
+
+def merchant_totals(conn: sqlite3.Connection, period: str, limit: int, today: date) -> Dict[str, Any]:
+    """Spend (net of refunds) and income per merchant for ``period``, biggest spend first."""
+    if not 1 <= limit <= MAX_MERCHANT_LIMIT:
+        raise UserError(f"limit must be 1..{MAX_MERCHANT_LIMIT}")
+    start, end = period_range(period, today)
+    span = (start.isoformat(), end.isoformat())
+    grouped = (
+        "SELECT description AS merchant,"
+        " -sum(CASE WHEN kind IN ('spend', 'refund') THEN amount ELSE 0 END) AS spent,"
+        " sum(CASE WHEN kind = 'income' THEN amount ELSE 0 END) AS income,"
+        " count(*) AS n FROM v_ledger"
+        " WHERE pending = 0 AND kind != 'transfer' AND date >= ? AND date <= ? GROUP BY description"
+    )
+    totals = one(
+        conn,
+        f"SELECT count(*) AS merchants, sum(spent) AS spent, sum(income) AS income FROM ({grouped})",
+        span,
+    )
+    rows = conn.execute(
+        f"SELECT * FROM ({grouped}) ORDER BY spent DESC, income DESC, merchant LIMIT ?",
+        span + (limit,),
+    ).fetchall()
+    merchants = []
+    for r in rows:
+        m: Dict[str, Any] = {"merchant": r["merchant"], "spent": money(r["spent"]), "count": r["n"]}
+        if r["income"]:
+            m["income"] = money(r["income"])
+        merchants.append(m)
+    pending = one(
+        conn,
+        "SELECT count(*) AS n FROM v_ledger WHERE pending = 1 AND kind != 'transfer'"
+        " AND date >= ? AND date <= ?",
+        span,
+    )
+    out: Dict[str, Any] = {
+        "period": period,
+        "start": shown_start(start),
+        "end": span[1],
+        "spend": money(totals["spent"] or 0.0),
+        "income": money(totals["income"] or 0.0),
+        "merchant_count": totals["merchants"],
+        "shown": len(merchants),
+        "truncated": totals["merchants"] > len(merchants),
+        "transfers_included": False,
+        "note": "posted only; spent is net of refunds; spend and income totals cover every merchant,"
+        " not just those shown; transfers between your own accounts excluded",
+    }
+    if pending["n"]:
+        out["pending_excluded"] = pending["n"]
+    out["merchants"] = merchants
     return out
 
 
@@ -466,6 +635,12 @@ def main(argv: Optional[List[str]] = None) -> int:
     r.add_argument("--days", type=int, required=True)
     s = sub.add_parser("spending_summary")
     s.add_argument("--period", required=True)
+    q = sub.add_parser("search_transactions")
+    q.add_argument("--query", required=True)
+    q.add_argument("--period", required=True)
+    m = sub.add_parser("merchant_totals")
+    m.add_argument("--period", required=True)
+    m.add_argument("--limit", type=int, default=MERCHANT_LIMIT)
     sub.add_parser("daily")
     sub.add_parser("health")
     args = parser.parse_args(argv)
@@ -483,6 +658,10 @@ def main(argv: Optional[List[str]] = None) -> int:
                 out = recent_transactions(conn, args.days, today)
             elif args.cmd == "spending_summary":
                 out = spending_summary(conn, args.period, today)
+            elif args.cmd == "search_transactions":
+                out = search_transactions(conn, args.query, args.period, today)
+            elif args.cmd == "merchant_totals":
+                out = merchant_totals(conn, args.period, args.limit, today)
             elif args.cmd == "daily":
                 mark_path = mark_file()
                 summary = daily_summary(conn, now, read_mark(mark_path))

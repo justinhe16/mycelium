@@ -24,7 +24,9 @@ pulling changes, `resonant ext update mycelium`.
 | `net_worth` | tool | L0 | Net worth from the latest daily snapshot (assets, liabilities), with its change over 1 day, 30 days and the year (days without a sync carry forward). Before the first snapshot it sums current balances. |
 | `account_balances` | tool | L0 | Every account with its balance (available when it differs), liabilities marked `owed`, hidden accounts marked and left out of the totals. |
 | `recent_transactions {days}` | tool | L0 | The last `days` (1-90) of transactions, newest first, at most 30 shown, plus the total count. Pending ones are marked. |
-| `spending_summary {period}` | tool | L0 | Income, spend (net of refunds), refunds, net, top categories and merchants. Posted only, transfers excluded. `period`: `this_month`, `last_month`, `last_7_days`, `last_30_days`, `ytd`, `YYYY-MM`, or `YYYY-MM-DD..YYYY-MM-DD`. |
+| `spending_summary {period}` | tool | L0 | Income, spend (net of refunds), refunds, net, top categories and merchants. Posted only, transfers excluded. `period`: `this_month`, `last_month`, `last_7_days`, `last_30_days`, `last_12_months` (the 365 days ending today), `ytd`, `all`, `YYYY-MM`, or `YYYY-MM-DD..YYYY-MM-DD`. The new tools take the same periods. |
+| `search_transactions {query, period}` | tool | L0 | "What's the total of my transactions with Whole Foods?" Every transaction whose merchant name, raw bank name or category (primary or detailed) contains `query`, case-insensitively (`food and drink` also finds `FOOD_AND_DRINK`). Returns the count, money in, money out, net, and first and last date, then the newest 25 rows (pending ones marked). Totals are posted only and cover **every** match. When rows are cut, `truncated` is true and the note says how many were shown. Transfers are excluded, like `spending_summary`: `transfers_included: false`, and any matching transfers are counted in `transfers_excluded`. Matching pending rows are summed in `pending`. `query` is 1-64 characters. |
+| `merchant_totals {period, limit}` | tool | L0 | Spend (net of refunds), income and transaction count per merchant, biggest spend first, `limit` merchants (1-100; the CLI defaults to 25). `spend`, `income` and `merchant_count` cover every merchant, not only those shown. Posted only, transfers excluded. |
 | `daily` | job, 07:20 | L0 | After mycelium's 07:00 launchd sync, reports the pulse item `mycelium/daily` at `normal` urgency: `Net worth $23.5k (+$500) · 2 new transactions, $30 spent`. "New" means posted transactions mycelium added since the job's last run (see below). A sync older than 26 hours or a login that needs relinking leads the line (`⚠ no sync since 2026-10-19`). A newly linked login is mentioned (`1 new login linked`), but its history isn't counted as new spending. Net worth counts as moved when it is $100 or 0.5% (whichever is more) away from the last figure reported. With none of that, it reports **quiet**, so the pulse and the briefing leave it out. `catchup: 2h`. |
 | health | every 30 min | | The database opens and `accounts` reads. |
 
@@ -67,6 +69,8 @@ Where the database is, first match wins:
 
 ```sh
 MYCELIUM_DB=data/demo.db python3 resonant-extension/cli.py spending_summary --period last_month
+MYCELIUM_DB=data/demo.db python3 resonant-extension/cli.py search_transactions --query="whole foods" --period=ytd
+MYCELIUM_DB=data/demo.db python3 resonant-extension/cli.py merchant_totals --period=last_month --limit=25
 npm run test:resonant      # python3 -m unittest discover -s resonant-extension/tests
 ```
 
