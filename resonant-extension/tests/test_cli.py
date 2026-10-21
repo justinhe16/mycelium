@@ -208,6 +208,129 @@ class Tools(Base):
             with self.assertRaises(cli.UserError, msg=bad):
                 cli.period_range(bad, TODAY)
 
+    def test_period_range_all_and_last_12_months(self) -> None:
+        self.assertEqual(cli.period_range("last_12_months", TODAY), (date(2025, 10, 22), TODAY))
+        self.assertEqual(cli.period_range("ALL", TODAY), (cli.ALL_START, TODAY))
+        out = cli.spending_summary(self.conn, "all", TODAY)
+        self.assertIsNone(out["start"])  # no made-up first day
+        self.assertEqual(out["income"], 8000.0)
+
+
+class Search(Base):
+    def add(self, tid: str, day: str, name: str, amount: float, merchant: str | None = None,
+            kind: str = "spend", category: str | None = None) -> None:
+        self.rw.execute(
+            "INSERT INTO transactions (id, account_id, date, name, merchant_name, amount, pending,"
+            " category_primary, kind, created_at, updated_at) VALUES (?, 'card', ?, ?, ?, ?, 0, ?, ?, ?, ?)",
+            (tid, day, name, merchant, amount, category, kind, ts(NOW), ts(NOW)),
+        )
+        self.rw.commit()
+
+    def test_totals_and_rows(self) -> None:
+        out = cli.search_transactions(self.conn, "whole foods", "this_month", TODAY)
+        self.assertEqual(out["count"], 3)
+        self.assertEqual((out["money_in"], out["money_out"], out["net"]), (20.0, 200.0, -180.0))
+        self.assertEqual((out["first_date"], out["last_date"]), ("2026-10-05", "2026-10-08"))
+        self.assertFalse(out["transfers_included"])
+        self.assertFalse(out["truncated"])
+        self.assertEqual([t["date"] for t in out["transactions"]], ["2026-10-08", "2026-10-06", "2026-10-05"])
+        self.assertEqual(out["transactions"][0], {"date": "2026-10-08", "description": "Whole Foods",
+                                                 "amount": 20.0, "kind": "refund",
+                                                 "account": "Rewards Card ··3333"})
+        self.assertNotIn("pending", out)
+        self.assertNotIn("transfers_excluded", out)
+
+    def test_matches_raw_name_and_is_case_insensitive(self) -> None:
+        self.assertEqual(cli.search_transactions(self.conn, "WholeFDS 4", "all", TODAY)["count"], 1)
+        out = cli.search_transactions(self.conn, "  payroll ", "ytd", TODAY)
+        self.assertEqual((out["query"], out["count"], out["money_in"]), ("payroll", 2, 8000.0))
+        self.assertEqual(cli.search_transactions(self.conn, "payroll", "2026-09", TODAY)["count"], 1)
+
+    def test_matches_category(self) -> None:
+        # "food and drink" finds FOOD_AND_DRINK: the 3 Whole Foods rows and Blue Bottle.
+        out = cli.search_transactions(self.conn, "Food and Drink", "this_month", TODAY)
+        self.assertEqual(out["count"], 4)
+        self.assertEqual(out["money_out"], 206.5)
+
+    def test_unicode_case_folding(self) -> None:
+        self.add("u1", "2026-10-10", "CAFE ELENA", -4.0, merchant="Café Élena")
+        self.assertEqual(cli.search_transactions(self.conn, "CAFÉ ÉLENA", "all", TODAY)["count"], 1)
+
+    def test_transfers_are_excluded_and_counted(self) -> None:
+        out = cli.search_transactions(self.conn, "card payment", "all", TODAY)
+        self.assertEqual(out["count"], 0)
+        self.assertEqual(out["transactions"], [])
+        self.assertEqual(out["transfers_excluded"], {"count": 1, "net": -1500.0})
+        self.assertIsNone(out["first_date"])
+
+    def test_pending_is_listed_but_not_totaled(self) -> None:
+        out = cli.search_transactions(self.conn, "uber", "last_7_days", TODAY)
+        self.assertEqual(out["count"], 0)
+        self.assertEqual(out["money_out"], 0.0)
+        self.assertEqual(out["pending"], {"count": 1, "money_in": 0.0, "money_out": 24.0})
+        self.assertTrue(out["transactions"][0]["pending"])
+
+    def test_totals_cover_every_match_when_rows_are_cut(self) -> None:
+        for i in range(40):
+            self.add(f"c{i}", f"2026-08-{i % 28 + 1:02d}", f"SQ *NEIGHBOR COFFEE {i}", -5.0,
+                     merchant="Neighbor Coffee Roasters Downtown")
+        out = cli.search_transactions(self.conn, "neighbor coffee", "all", TODAY)
+        self.assertEqual(out["count"], 40)
+        self.assertEqual(out["money_out"], 200.0)
+        self.assertEqual(out["shown"], cli.SEARCH_ROWS)
+        self.assertTrue(out["truncated"])
+        self.assertIn("newest 25 of 40 rows", out["note"])
+        self.assertEqual(out["transactions"][0]["date"], "2026-08-28")
+        # Totals come before the rows, and the whole result fits the model's 4 KB view.
+        keys = list(out)
+        self.assertLess(keys.index("money_out"), keys.index("transactions"))
+        printed = json.dumps(out, separators=(",", ":"))  # as cli prints it
+        self.assertLess(len(printed.encode()), 4096)
+
+    def test_query_is_data_not_sql(self) -> None:
+        for q in ("%", "'; DROP TABLE transactions; --", "\\"):
+            self.assertEqual(cli.search_transactions(self.conn, q, "all", TODAY)["count"], 0, q)
+        self.assertEqual(self.rw.execute("SELECT count(*) FROM transactions").fetchone()[0], 9)
+
+    def test_bad_query_and_period(self) -> None:
+        for q in ("", "   ", "x" * 65):
+            with self.assertRaises(cli.UserError):
+                cli.search_transactions(self.conn, q, "all", TODAY)
+        with self.assertRaises(cli.UserError):
+            cli.search_transactions(self.conn, "uber", "forever", TODAY)
+
+
+class MerchantTotals(Base):
+    def test_month(self) -> None:
+        out = cli.merchant_totals(self.conn, "this_month", 25, TODAY)
+        self.assertEqual(
+            out["merchants"],
+            [
+                {"merchant": "RENT", "spent": 2000.0, "count": 1},
+                {"merchant": "Whole Foods", "spent": 180.0, "count": 3},  # net of the refund
+                {"merchant": "Blue Bottle", "spent": 6.5, "count": 1},
+                {"merchant": "ACME PAYROLL", "spent": 0.0, "count": 1, "income": 4000.0},
+            ],
+        )
+        # The same totals spending_summary reports: transfers and pending left out.
+        summary = cli.spending_summary(self.conn, "this_month", TODAY)
+        self.assertEqual((out["spend"], out["income"]), (summary["spend"], summary["income"]))
+        self.assertEqual((out["merchant_count"], out["shown"], out["truncated"]), (4, 4, False))
+        self.assertEqual(out["pending_excluded"], 1)
+        self.assertFalse(out["transfers_included"])
+
+    def test_limit_cuts_rows_not_totals(self) -> None:
+        out = cli.merchant_totals(self.conn, "this_month", 1, TODAY)
+        self.assertEqual([m["merchant"] for m in out["merchants"]], ["RENT"])
+        self.assertTrue(out["truncated"])
+        self.assertEqual((out["spend"], out["merchant_count"]), (2186.5, 4))
+
+    def test_bounds(self) -> None:
+        for limit in (0, 101):
+            with self.assertRaises(cli.UserError):
+                cli.merchant_totals(self.conn, "this_month", limit, TODAY)
+        self.assertEqual(cli.merchant_totals(self.conn, "all", 100, TODAY)["income"], 8000.0)
+
 
 class Daily(Base):
     def add_txn(self, tid: str, created: datetime, amount: float = -10.0, pending: int = 0,
@@ -363,6 +486,10 @@ class Contract(Base):
             ["account_balances"],
             ["recent_transactions", "--days", "7"],
             ["spending_summary", "--period", "last_30_days"],
+            ["search_transactions", "--query=whole foods", "--period=all"],
+            ["search_transactions", "--query=-x", "--period=ytd"],  # a leading "-" is a value
+            ["merchant_totals", "--period=last_12_months", "--limit=25"],
+            ["merchant_totals", "--period", "this_month"],  # --limit defaults to 25
             ["health"],
         ):
             proc, _ = self.run_cli(*args)
@@ -375,6 +502,9 @@ class Contract(Base):
         proc, _ = self.run_cli("spending_summary", "--period", "someday")
         self.assertEqual(proc.returncode, 1)
         self.assertIn("period must be", json.loads(proc.stdout)["error"])
+        proc, _ = self.run_cli("merchant_totals", "--period=all", "--limit=500")
+        self.assertEqual(proc.returncode, 1)
+        self.assertIn("limit must be", json.loads(proc.stdout)["error"])
 
     def test_daily_reports_to_the_pulse(self) -> None:
         proc, events = self.run_cli("daily", events=True)
@@ -408,7 +538,13 @@ class Contract(Base):
     def test_never_writes(self) -> None:
         self.rw.close()  # checkpoints the WAL into the main file
         before = hashlib.sha256(self.path.read_bytes()).hexdigest()
-        for args in (["net_worth"], ["daily"], ["spending_summary", "--period", "ytd"]):
+        for args in (
+            ["net_worth"],
+            ["daily"],
+            ["spending_summary", "--period", "ytd"],
+            ["search_transactions", "--query=foods", "--period=all"],
+            ["merchant_totals", "--period=all", "--limit=100"],
+        ):
             self.assertEqual(self.run_cli(*args)[0].returncode, 0)
         self.assertEqual(hashlib.sha256(self.path.read_bytes()).hexdigest(), before)
         self.rw = sqlite3.connect(self.path)
