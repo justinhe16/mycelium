@@ -16,6 +16,11 @@ describe("stableNodePath", () => {
     expect(stableNodePath(CELLAR, pathEnv, exists)).toBe("/usr/local/bin/node");
   });
 
+  it("skips fnm's per-shell directories, which vanish when the shell exits", () => {
+    const pathEnv = "/Users/me/.local/state/fnm_multishells/123_456/bin:/opt/homebrew/bin";
+    expect(stableNodePath(CELLAR, pathEnv, () => true)).toBe("/opt/homebrew/bin/node");
+  });
+
   it("ignores empty and relative PATH entries", () => {
     expect(stableNodePath(CELLAR, ":.:bin:/usr/local/bin", (p) => p === "/usr/local/bin/node")).toBe(
       "/usr/local/bin/node",

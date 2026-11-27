@@ -20,9 +20,12 @@ function isExecutable(p: string): boolean {
   }
 }
 
-/** A path inside one specific installed version, which an upgrade deletes. */
-function isVersionedPath(p: string): boolean {
-  return /\/Cellar\//.test(p);
+/**
+ * A path that goes away later: inside one Homebrew version (deleted by
+ * `brew upgrade`) or an fnm per-shell directory (deleted when the shell exits).
+ */
+function isVolatilePath(p: string): boolean {
+  return /\/Cellar\/|\/fnm_multishells\//.test(p);
 }
 
 /**
@@ -33,8 +36,8 @@ function isVersionedPath(p: string): boolean {
  * directory, and launchd then can't spawn the job at all (exit 78, EX_CONFIG,
  * nothing in the log). So prefer the first `node` on PATH, unresolved: e.g.
  * `/opt/homebrew/bin/node`, a symlink Homebrew repoints on every upgrade.
- * PATH entries inside node_modules (added by `npm run`) and Cellar
- * directories are skipped. Falls back to `execPath`.
+ * PATH entries inside node_modules (added by `npm run`), Cellar and fnm
+ * per-shell directories are skipped. Falls back to `execPath`.
  */
 export function stableNodePath(
   execPath: string,
@@ -44,7 +47,7 @@ export function stableNodePath(
   for (const dir of (pathEnv ?? "").split(path.delimiter)) {
     if (!dir || !path.isAbsolute(dir)) continue;
     if (dir.split(path.sep).includes("node_modules")) continue;
-    if (isVersionedPath(dir)) continue;
+    if (isVolatilePath(`${dir}/`)) continue;
     const candidate = path.join(dir, "node");
     if (exists(candidate)) return candidate;
   }
