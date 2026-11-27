@@ -12,40 +12,13 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { execFileSync } from "node:child_process";
+import { LABEL, buildPlist, stableNodePath } from "../src/lib/launchd";
 
-const LABEL = "com.mycelium.sync";
 const HOUR = Number(process.env.MYCELIUM_SYNC_HOUR ?? 7);
 const plistPath = path.join(os.homedir(), "Library", "LaunchAgents", `${LABEL}.plist`);
 const repo = process.cwd();
 const domain = `gui/${process.getuid?.() ?? 501}`;
-
-function xml(s: string) {
-  return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
-}
-
-function plist(): string {
-  const tsx = path.join(repo, "node_modules", "tsx", "dist", "cli.mjs");
-  const log = path.join(repo, "data", "sync.log");
-  const args = [process.execPath, tsx, "scripts/sync.ts", "--trigger=launchd"];
-  return `<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-  <key>Label</key><string>${LABEL}</string>
-  <key>ProgramArguments</key>
-  <array>
-${args.map((a) => `    <string>${xml(a)}</string>`).join("\n")}
-  </array>
-  <key>WorkingDirectory</key><string>${xml(repo)}</string>
-  <key>StartCalendarInterval</key>
-  <dict><key>Hour</key><integer>${HOUR}</integer><key>Minute</key><integer>0</integer></dict>
-  <key>StandardOutPath</key><string>${xml(log)}</string>
-  <key>StandardErrorPath</key><string>${xml(log)}</string>
-  <key>ProcessType</key><string>Background</string>
-</dict>
-</plist>
-`;
-}
+const node = stableNodePath(process.execPath, process.env.PATH);
 
 function bootout() {
   try {
@@ -60,10 +33,11 @@ if (cmd === "install") {
   fs.mkdirSync(path.dirname(plistPath), { recursive: true });
   fs.mkdirSync(path.join(repo, "data"), { recursive: true });
   bootout();
-  fs.writeFileSync(plistPath, plist());
+  fs.writeFileSync(plistPath, buildPlist({ repo, node, hour: HOUR }));
   execFileSync("launchctl", ["bootstrap", domain, plistPath], { stdio: "inherit" });
   console.log(`Installed ${LABEL}: daily sync at ${String(HOUR).padStart(2, "0")}:00.`);
   console.log(`  plist: ${plistPath}`);
+  console.log(`  node:  ${node}`);
   console.log(`  log:   ${path.join(repo, "data", "sync.log")}`);
   console.log(`Run it now with: launchctl kickstart ${domain}/${LABEL}`);
 } else if (cmd === "uninstall") {
